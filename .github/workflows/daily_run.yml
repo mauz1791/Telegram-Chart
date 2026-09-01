@@ -1,0 +1,28 @@
+name: Eurex Daily Telegram Alert
+
+on:
+  schedule:
+    # Esecuzione dal lunedì al venerdì alle 19:30 CET (18:30 UTC)
+    - cron: '30 18 * * 1-5'
+  workflow_dispatch: # Permette l'avvio manuale tramite pulsante per test
+
+jobs:
+  run-reporter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Execute Script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python eurex_reporter.py
