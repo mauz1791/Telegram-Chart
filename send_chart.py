@@ -58,7 +58,7 @@ def send_telegram_photo(image_path="bmw_chart.png"):
         raise ValueError("TELEGRAM_CHAT_ID mancante o vuoto.")
 
     telegram_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    caption = "📊 Grafico BMW (XETR:BMW) con indicatori personalizzati"
+    caption = "BMW (XETR:BMW)"
 
     with open(image_path, "rb") as img:
         response = requests.post(
