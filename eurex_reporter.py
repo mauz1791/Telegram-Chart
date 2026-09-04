@@ -33,7 +33,7 @@ def send_telegram_text(text: str):
     requests.post(url, json=payload, timeout=15)
 
 def main():
-    target_url = "https://www.eurex.com/ex-en/markets/equ/equ-opt/options/BMW-950222"
+    target_url = "https://it.tradingview.com/chart/KyeIeMP6/?symbol=XETR%3ABMW"
     screenshot_path = "eurex_bmw.png"
     
     print("Avvio Playwright Chromium...")
