@@ -72,7 +72,7 @@ def main():
 
     caption = (
         "📊 <b>REPORT EUREX BMW — AGGIORNAMENTO GIORNALIERO</b>\n\n"
-        "🔗 <a href='https://www.eurex.com/ex-en/markets/equ/equ-opt/options/BMW-950222'>Apri Scheda Eurex BMW</a>\n\n"
+        "🔗 <a href='https://it.tradingview.com/chart/KyeIeMP6/?symbol=XETR%3ABMW'>Apri Scheda Eurex BMW</a>\n\n"
         "<i>Screenshot automatico catturato alla chiusura.</i>"
     )
     
