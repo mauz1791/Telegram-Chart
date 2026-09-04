@@ -4,32 +4,52 @@ from playwright.sync_api import sync_playwright
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TV_SESSIONID = os.getenv("TRADINGVIEW_SESSIONID")
 
-# URL diretto al tuo layout personale
 CHART_LAYOUT_URL = "https://it.tradingview.com/chart/KyeIeMP6/?symbol=XETR%3ABMW"
 
 def take_chart_screenshot(output_path="bmw_chart.png"):
-    print("Apertura layout TradingView BMW...")
+    print("Avvio browser...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # Imposta una risoluzione ampia e un User-Agent desktop per evitare versioni mobile o tagli
         context = browser.new_context(
-            viewport={"width": 1400, "height": 1050},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            viewport={"width": 1600, "height": 1100},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
+
+        # Se presente, inietta il cookie di sessione per autenticare l'account
+        if TV_SESSIONID:
+            context.add_cookies([
+                {
+                    "name": "sessionid",
+                    "value": TV_SESSIONID,
+                    "domain": ".tradingview.com",
+                    "path": "/"
+                }
+            ])
+            print("Cookie di sessione TradingView caricato.")
+
         page = context.new_page()
         page.goto(CHART_LAYOUT_URL, wait_until="domcontentloaded")
-        
-        # Attesa necessaria per caricare i dati storici e calcolare gli script Pine
-        page.wait_for_timeout(9000)
-        
-        # Chiude eventuali overlay, notifiche o menu aperti
+
+        # Attende 10 secondi per caricare la serie storica e calcolare gli indicatori
+        page.wait_for_timeout(10000)
+
+        # Chiude la barra laterale della Watchlist premendo Alt+W se aperta
+        try:
+            page.keyboard.press("Alt+w")
+            page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        # Chiude eventuali modali o banner premendo Escape
         page.keyboard.press("Escape")
         page.wait_for_timeout(1000)
-        
+
+        # Scatta lo screenshot
         page.screenshot(path=output_path)
         browser.close()
-    print("Screenshot con indicatori catturato con successo.")
+    print("Screenshot catturato con indicatori caricati.")
 
 def send_telegram_photo(image_path="bmw_chart.png"):
     if not BOT_TOKEN:
@@ -38,7 +58,7 @@ def send_telegram_photo(image_path="bmw_chart.png"):
         raise ValueError("TELEGRAM_CHAT_ID mancante o vuoto.")
 
     telegram_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    caption = "📊 Aggiornamento Grafico BMW (XETR:BMW) - TradingView"
+    caption = "📊 Grafico BMW (XETR:BMW) con indicatori personalizzati"
 
     with open(image_path, "rb") as img:
         response = requests.post(
