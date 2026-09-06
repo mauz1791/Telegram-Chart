@@ -23,18 +23,17 @@ STOCKS = [
         "symbol": "XETR:RWE",
         "timeframe": "1W",
     },
-        {
+    {
         "name": "DTE",
         "symbol": "XETR:DTE",
         "timeframe": "1W",
     },
-            {
+    {
         "name": "MBG",
         "symbol": "XETR:MBG",
         "timeframe": "1W",
     },
-    },
-            {
+    {
         "name": "CBK",
         "symbol": "XETR:CBK",
         "timeframe": "1W",
