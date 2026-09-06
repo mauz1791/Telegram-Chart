@@ -30,7 +30,13 @@ STOCKS = [
     },
             {
         "name": "MBG",
-        "symbol": "XETR:DTE",
+        "symbol": "XETR:MBG",
+        "timeframe": "1W",
+    },
+    },
+            {
+        "name": "CBK",
+        "symbol": "XETR:CBK",
         "timeframe": "1W",
     },
     # Esempio per aggiungerne un'altra:
