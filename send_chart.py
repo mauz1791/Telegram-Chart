@@ -14,9 +14,44 @@ BASE_LAYOUT_URL = "https://it.tradingview.com/chart/KyeIeMP6/"
 # Aggiungi qui tutte le azioni che vuoi includere
 STOCKS = [
     {
+        "name": "ABBN",
+        "symbol": "SIX:ABBN",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ACCOR SA",
+        "symbol": "EURONEXT:AC",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ADECCO GROUP AG",
+        "symbol": "SIX:ADEN",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ADIDAS AG",
+        "symbol": "XETR:ADS",
+        "timeframe": "1W",
+    },
+    {
+        "name": "CARL ZEISS MEDITEC AG",
+        "symbol": "XETR:AFX",
+        "timeframe": "1W",
+    },
+    {
+        "name": "AHOLD DELHAIZE N.V.",
+        "symbol": "EURONEXT:AD",
+        "timeframe": "1W",
+    },
+    {
+        "name": "AIR LIQUIDE",
+        "symbol": "EURONEXT:AI",
+        "timeframe": "1W",
+    },
+    {
         "name": "BMW",
         "symbol": "XETR:BMW",
-        "timeframe": "1W", # Candele settimanali
+        "timeframe": "1W",
     },
     {
         "name": "RWE",
