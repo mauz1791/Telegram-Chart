@@ -47,6 +47,56 @@ STOCKS = [
         "name": "AIR LIQUIDE",
         "symbol": "EURONEXT:AI",
         "timeframe": "1W",
+    },    
+    {
+        "name": "AIXTRON",
+        "symbol": "XETR:AIXA",
+        "timeframe": "1W",
+    },
+    {
+        "name": "AKZO NOBEL N.V.",
+        "symbol": "EURONEXT:AKZA",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ALCON AG",
+        "symbol": "SIX:ALC",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ALLIANZ SE",
+        "symbol": "XETR:ALV",
+        "timeframe": "1W",
+    },
+    {
+        "name": "AUMOVIO SE",
+        "symbol": "XETR:AMV0",
+        "timeframe": "1W",
+    },
+    {
+        "name": "VONOVIA SE",
+        "symbol": "XETR:VNA",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ARYZTA AG",
+        "symbol": "SIX:ARYN",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ASSICURAZIONI GENERALI SPA",
+        "symbol": "MIL:G",
+        "timeframe": "1W",
+    },
+    {
+        "name": "ASML HOLDING N.V.",
+        "symbol": "EURONEXT:ASML",
+        "timeframe": "1W",
+    },
+    {
+        "name": "AROUNDTOWN SA",
+        "symbol": "XETR:AT1",
+        "timeframe": "1W",
     },
     {
         "name": "BMW",
@@ -115,7 +165,7 @@ def capture_all_charts():
             print(f"Caricamento {name} ({symbol})...")
 
             page.goto(target_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(9000)  # Attende il ricalcolo di MACD e ROCWMA
+            page.wait_for_timeout(9000)  # Attende il ricalcolo di MACD
 
             # Chiude eventuali pannelli laterali o banner
             try:
