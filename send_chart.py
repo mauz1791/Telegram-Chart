@@ -99,9 +99,64 @@ STOCKS = [
         "timeframe": "1W",
     },
     {
+        "name": "AXA SA",
+        "symbol": "EURONEXT:CS",
+    },
+    {
+        "name": "JULIUS BAER GRUPPE",
+        "symbol": "SIX:BAER",
+    },
+    {
+        "name": "HELVETIA BALOISE HOLDING AD",
+        "symbol": "SIX:HBAN",
+    },
+    {
+        "name": "BASF SE",
+        "symbol": "XETR:BAS",
+    },
+    {
+        "name": "BAYER AG",
+        "symbol": "XETR:BAYN",
+    },
+    {
+        "name": "BANCO BILBAO VIZCAYA",
+        "symbol": "BME:BBVA",
+    },
+    {
+        "name": "BECHTLE AG",
+        "symbol": "XETR:BC8",
+    },
+    {
+        "name": "BEIERSDORF AG",
+        "symbol": "XETR:BEI",
+    },
+    {
         "name": "BMW",
         "symbol": "XETR:BMW",
-        "timeframe": "1W",
+    },
+    {
+        "name": "BNP PARIBAS",
+        "symbol": "EURONEXT:BNP",
+    },
+    {
+        "name": "BRENNTAG SE",
+        "symbol": "XETR:BNR",
+    },
+    {
+        "name": "HUGO BOSS AG",
+        "symbol": "XETR:BOSS",
+    },
+    {
+        "name": "BANCO SANTANDER S.A.",
+        "symbol": "BME:SAN",
+    },
+    {
+        "name": "DANONE SE",
+        "symbol": "EURONEXT:BN",
+    },
+    {
+        "name": "BOUYGUES SA",
+        "symbol": "EURONEXT:EN",
     },
     {
         "name": "RWE",
