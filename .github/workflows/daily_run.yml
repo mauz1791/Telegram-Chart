@@ -1,0 +1,30 @@
+name: Eurex Daily Telegram Alert
+
+on:
+  schedule:
+    # Esecuzione dal lunedì al venerdì alle 19:30 CET (18:30 UTC)
+    - cron: '30 18 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-reporter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies & Playwright
+        run: |
+          pip install requests playwright numpy scipy
+          playwright install chromium --with-deps
+
+      - name: Execute Script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python eurex_reporter.py
