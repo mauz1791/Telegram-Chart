@@ -9,8 +9,23 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 from playwright.sync_api import sync_playwright
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+raw_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+# Rimuove un eventuale prefisso 'bot' se incollato per errore nel Secret
+if raw_token.lower().startswith("bot"):
+    raw_token = raw_token[3:].strip()
+
+TELEGRAM_TOKEN = raw_token
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+if not TELEGRAM_TOKEN or ":" not in TELEGRAM_TOKEN:
+    print(f"❌ ERRORE CONFIGURAZIONE: TELEGRAM_TOKEN mancante o non valido (lunghezza letta: {len(TELEGRAM_TOKEN)}). Controlla Settings > Secrets and variables > Actions.")
+    sys.exit(1)
+
+if not TELEGRAM_CHAT_ID:
+    print("❌ ERRORE CONFIGURAZIONE: TELEGRAM_CHAT_ID mancante nei Secrets di GitHub.")
+    sys.exit(1)
+
+print(f"✅ Secrets caricati correttamente (Token len: {len(TELEGRAM_TOKEN)}, Chat ID: {TELEGRAM_CHAT_ID[:3]}***)")
 
 # Parametri di portafoglio per il calcolo del nuovo PMC in caso di assegnazione
 PORTFOLIO_SHARES = 100
