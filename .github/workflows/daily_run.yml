@@ -2,6 +2,7 @@ name: Eurex Daily Telegram Alert
 
 on:
   schedule:
+    # Esecuzione dal lunedì al venerdì alle 19:30 CET (18:30 UTC)
     - cron: '30 18 * * 1-5'
   workflow_dispatch:
 
@@ -24,6 +25,6 @@ jobs:
 
       - name: Execute Script
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python eurex_reporter.py
