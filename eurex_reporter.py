@@ -3,6 +3,7 @@ import re
 import sys
 import csv
 import math
+import traceback
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,7 +24,7 @@ PORTFOLIO_PMC = 74.00
 MORNINGSTAR_FV = 67.00
 RISK_FREE_RATE = 0.025
 
-# Posizione Put attualmente aperta in portafoglio
+# Posizione Put aperta in portafoglio
 OPEN_PUT_EXP = "20/11/2026"
 OPEN_PUT_STRIKE = 57.00
 OPEN_PUT_ENTRY = 1.45
@@ -108,193 +109,187 @@ def compute_put_greeks(S: float, K: float, T: float, r: float, price: float):
     return iv * 100.0, delta, prob_profit
 
 
-def parse_visible_table(page, exp_label: str) -> dict:
+def parse_three_eurex_tables(page, exp_label: str) -> dict:
     """
-    Unisce le 3 tabelle affiancate di Eurex (Call a sinistra, Strike al centro, Put a destra)
-    accoppiando le celle che si trovano sulla stessa linea orizzontale (coordinata Y).
+    Legge le 3 tabelle separate di Eurex (Call Table, Strike Table, Put Table)
+    e le unisce indice per indice (riga 0..14).
     """
-    raw_lines = page.evaluate(r"""() => {
-        const allCells = Array.from(document.querySelectorAll('table td, table th')).map(el => {
-            const r = el.getBoundingClientRect();
-            return {
-                text: el.innerText.trim(),
-                cx: r.left + r.width / 2,
-                cy: r.top + r.height / 2,
-                w: r.width,
-                h: r.height
-            };
-        }).filter(c => c.w > 8 && c.h > 8 && c.text !== '');
+    data = page.evaluate(r"""() => {
+        const tables = Array.from(document.querySelectorAll('table'));
+        let strikeList = [];
+        let dataTables = [];
 
-        // Individua le celle Strike nella colonna centrale (formato XX.00 o XX.50 tra 25 e 120)
-        // Per non confonderle con i prezzi, la colonna Strike è quella che ha almeno 5 numeri .00/.50 incolonnati alla stessa X
-        const strikeCandidates = allCells.filter(c => /^\d{2,3}\.(00|50)$/.test(c.text));
-        if (strikeCandidates.length === 0) return [];
+        for (const t of tables) {
+            const rows = Array.from(t.querySelectorAll('tbody tr, tr')).map(tr =>
+                Array.from(tr.querySelectorAll('td, th'))
+                    .map(c => c.innerText.trim())
+                    .filter(txt => txt !== '')
+            ).filter(r => r.length > 0);
 
-        // Trova la coordinata X mediana della colonna Strike
-        const xs = strikeCandidates.map(c => c.cx).sort((a, b) => a - b);
-        const strikeColX = xs[Math.floor(xs.length / 2)];
+            // Controlla se è la tabella centrale degli Strike (righe da 1 sola cella XX.00 / XX.50)
+            const singleStrikeRows = rows.filter(r => r.length === 1 && /^\d{2,3}\.(00|50)$/.test(r[0]));
+            if (singleStrikeRows.length >= 5) {
+                strikeList = singleStrikeRows.map(r => parseFloat(r[0]));
+                continue;
+            }
 
-        const strikeCells = strikeCandidates.filter(c => Math.abs(c.cx - strikeColX) < 35);
-
-        const joinedRows = [];
-        for (const sc of strikeCells) {
-            const val = parseFloat(sc.text);
-            if (isNaN(val) || val < 25 || val > 120) continue;
-
-            // Prende tutte le celle numeriche o '-' sulla stessa riga orizzontale (stessa Y ± 12px)
-            const rowCells = allCells.filter(c =>
-                Math.abs(c.cy - sc.cy) < 12 &&
-                /^(-|\d[\d,.]*)$/.test(c.text)
+            // Controlla se è una tabella dati Call o Put (righe con almeno 6 valori numerici o '-')
+            const validDataRows = rows.filter(r =>
+                r.length >= 6 &&
+                !r.some(cell => /strike|settle|volume|total/i.test(cell)) &&
+                r.filter(cell => /^(-|\d[\d,.]*)$/.test(cell)).length >= 6
             );
-
-            const leftCall = rowCells
-                .filter(c => c.cx < sc.cx - 15)
-                .sort((a, b) => a.cx - b.cx)
-                .map(c => c.text);
-
-            const rightPut = rowCells
-                .filter(c => c.cx > sc.cx + 15)
-                .sort((a, b) => a.cx - b.cx)
-                .map(c => c.text);
-
-            joinedRows.push({
-                strike: val,
-                callTokens: leftCall,
-                putTokens: rightPut
-            });
+            if (validDataRows.length >= 5) {
+                dataTables.push(validDataRows);
+            }
         }
-        return joinedRows;
+
+        // Caso fallback: se fosse una singola tabella unificata
+        if (strikeList.length === 0) {
+            const allTrs = Array.from(document.querySelectorAll('tr')).map(tr =>
+                Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim()).filter(x => x !== '')
+            ).filter(r => r.length >= 13);
+            return { mode: 'single', rows: allTrs };
+        }
+
+        return {
+            mode: 'three_tables',
+            strikes: strikeList,
+            callRows: dataTables.length >= 1 ? dataTables[0] : [],
+            putRows: dataTables.length >= 2 ? dataTables[1] : []
+        };
     }""")
 
     extracted = {}
-    for item in raw_lines:
-        k = float(item["strike"])
-        c_tok = item["callTokens"]
-        p_tok = item["putTokens"]
 
-        # Le ultime 6 celle Call prima dello Strike sono: D.Settle, OI adj, Volume, Last, Bid, Ask
-        c_6 = c_tok[-6:] if len(c_tok) >= 6 else (["0"] * (6 - len(c_tok)) + c_tok)
-        # Le prime 6 celle Put dopo lo Strike sono: Bid, Ask, Last, Volume, OI adj, D.Settle
-        p_6 = p_tok[:6] if len(p_tok) >= 6 else (p_tok + ["0"] * (6 - len(p_tok)))
+    if data.get("mode") == "three_tables":
+        strikes = data.get("strikes", [])
+        call_rows = data.get("callRows", [])
+        put_rows = data.get("putRows", [])
+        n = min(len(strikes), len(call_rows), len(put_rows))
 
-        extracted[k] = {
-            "expiration": exp_label,
-            "strike": k,
-            "c_settle": parse_num(c_6[0]),
-            "c_oi": int(parse_num(c_6[1])),
-            "c_vol": int(parse_num(c_6[2])),
-            "c_last": parse_num(c_6[3]),
-            "c_bid": parse_num(c_6[4]),
-            "c_ask": parse_num(c_6[5]),
-            "p_bid": parse_num(p_6[0]),
-            "p_ask": parse_num(p_6[1]),
-            "p_last": parse_num(p_6[2]),
-            "p_vol": int(parse_num(p_6[3])),
-            "p_oi": int(parse_num(p_6[4])),
-            "p_settle": parse_num(p_6[5]),
-        }
+        for i in range(n):
+            k = float(strikes[i])
+            if not (25.0 <= k <= 120.0):
+                continue
+            c_r = call_rows[i]
+            p_r = put_rows[i]
+
+            # Nella tabella Call (a sinistra), le ultime 6 colonne sono: D.Settle, OI adj, Volume, Last, Bid, Ask
+            c_6 = c_r[-6:] if len(c_r) >= 6 else (["0"] * (6 - len(c_r)) + c_r)
+            # Nella tabella Put (a destra), le prime 6 colonne sono: Bid, Ask, Last, Volume, OI adj, D.Settle
+            p_6 = p_r[:6] if len(p_r) >= 6 else (p_r + ["0"] * (6 - len(p_r)))
+
+            extracted[k] = {
+                "expiration": exp_label,
+                "strike": k,
+                "c_settle": parse_num(c_6[0]),
+                "c_oi": int(parse_num(c_6[1])),
+                "c_vol": int(parse_num(c_6[2])),
+                "c_last": parse_num(c_6[3]),
+                "c_bid": parse_num(c_6[4]),
+                "c_ask": parse_num(c_6[5]),
+                "p_bid": parse_num(p_6[0]),
+                "p_ask": parse_num(p_6[1]),
+                "p_last": parse_num(p_6[2]),
+                "p_vol": int(parse_num(p_6[3])),
+                "p_oi": int(parse_num(p_6[4])),
+                "p_settle": parse_num(p_6[5]),
+            }
+
+    elif data.get("mode") == "single":
+        for r in data.get("rows", []):
+            mid = len(r) // 2
+            k = parse_num(r[mid])
+            if 25.0 <= k <= 120.0:
+                extracted[k] = {
+                    "expiration": exp_label,
+                    "strike": k,
+                    "c_settle": parse_num(r[mid - 6]),
+                    "c_oi": int(parse_num(r[mid - 5])),
+                    "c_vol": int(parse_num(r[mid - 4])),
+                    "c_last": parse_num(r[mid - 3]),
+                    "c_bid": parse_num(r[mid - 2]),
+                    "c_ask": parse_num(r[mid - 1]),
+                    "p_bid": parse_num(r[mid + 1]),
+                    "p_ask": parse_num(r[mid + 2]),
+                    "p_last": parse_num(r[mid + 3]),
+                    "p_vol": int(parse_num(r[mid + 4])),
+                    "p_oi": int(parse_num(r[mid + 5])),
+                    "p_settle": parse_num(r[mid + 6]),
+                }
 
     return extracted
 
 
-def click_pagination_arrow(page, direction: str) -> bool:
+def click_strike_table_arrow(page, direction: str) -> bool:
     """
-    Trova le frecce ^ (up) e v (down) incolonnate sopra e sotto la colonna centrale Strike
-    cercando in TUTTE le tabelle della pagina.
+    Cerca le frecce ^ (up) e v (down) specificamente dentro la tabella centrale degli Strike.
     """
-    target_coords = page.evaluate(r"""(dir) => {
-        const allCells = Array.from(document.querySelectorAll('table td, table th')).map(el => {
-            const r = el.getBoundingClientRect();
-            return { text: el.innerText.trim(), cx: r.left + r.width / 2, cy: r.top + r.height / 2, w: r.width };
-        }).filter(c => c.w > 8 && /^\d{2,3}\.(00|50)$/.test(c.text));
-
-        if (allCells.length === 0) return null;
-        const xs = allCells.map(c => c.cx).sort((a, b) => a - b);
-        const strikeX = xs[Math.floor(xs.length / 2)];
-
-        // Cerca tutte le icone SVG incolonnate con strikeX (entro 45px)
-        const svgs = Array.from(document.querySelectorAll('svg')).map(s => {
-            const r = s.getBoundingClientRect();
-            return { el: s, x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height };
-        }).filter(s => s.w > 5 && s.h > 5 && Math.abs(s.x - strikeX) < 45);
-
-        if (svgs.length === 0) return null;
-        svgs.sort((a, b) => a.y - b.y);
-
-        const chosen = (dir === 'up') ? svgs[0] : svgs[svgs.length - 1];
-        const clickable = chosen.el.closest('button, td, th, tr, div') || chosen.el;
-        clickable.click();
-        return { x: chosen.x, y: chosen.y };
-    }""", direction)
-
-    if not target_coords:
-        return False
-
-    try:
-        page.mouse.click(target_coords["x"], target_coords["y"])
-    except Exception:
-        pass
-    page.wait_for_timeout(900)
-    return True
-
-
-def screenshot_all_three_tables(page, path: str) -> bool:
-    """Fotografa il riquadro unico che racchiude tutte e 3 le tabelle (Call + Strike + Put)."""
-    clip_box = page.evaluate(r"""() => {
-        const tables = Array.from(document.querySelectorAll('table')).filter(t => t.offsetWidth > 20 && t.offsetHeight > 50);
-        if (tables.length === 0) return null;
-        let minX = 99999, minY = 99999, maxX = 0, maxY = 0;
+    clicked = page.evaluate(r"""(dir) => {
+        const tables = Array.from(document.querySelectorAll('table'));
+        let strikeTable = null;
         for (const t of tables) {
-            const r = t.getBoundingClientRect();
-            minX = Math.min(minX, r.left + window.scrollX);
-            minY = Math.min(minY, r.top + window.scrollY);
-            maxX = Math.max(maxX, r.right + window.scrollX);
-            maxY = Math.max(maxY, r.bottom + window.scrollY);
+            if (t.innerText.includes('Strike')) {
+                strikeTable = t;
+                break;
+            }
         }
-        return { x: Math.max(0, minX - 10), y: Math.max(0, minY - 10), width: maxX - minX + 20, height: maxY - minY + 20 };
-    }""")
-    try:
-        if clip_box and clip_box["width"] > 100 and clip_box["height"] > 100:
-            page.screenshot(path=path, clip=clip_box, full_page=True)
-            return True
-    except Exception:
-        pass
-    return False
+        const scope = strikeTable || document;
+        const svgs = Array.from(scope.querySelectorAll('tbody svg, tr svg'));
+        if (svgs.length === 0) return false;
+
+        const targetSvg = (dir === 'up') ? svgs[0] : svgs[svgs.length - 1];
+        const btn = targetSvg.closest('button, td, th, tr, div') || targetSvg;
+        btn.scrollIntoView({ block: 'center' });
+        if (typeof btn.click === 'function') {
+            btn.click();
+        } else {
+            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        }
+        return true;
+    }""", direction)
+    if clicked:
+        page.wait_for_timeout(900)
+    return bool(clicked)
 
 
 def scrape_full_expiration(page, exp_label: str, take_screenshots: bool = False):
     rows_data = {}
     screenshots = []
 
-    rows_data.update(parse_visible_table(page, exp_label))
+    rows_data.update(parse_three_eurex_tables(page, exp_label))
 
-    # 1. Clicca la freccia SU (^) fino a raggiungere gli strike minimi (44€ - 53€)
-    for _ in range(6):
+    # 1. Clicca la freccia SU (^) fino agli strike minimi (44€ - 53€)
+    for _ in range(5):
         prev_min = min(rows_data.keys()) if rows_data else 999
-        if not click_pagination_arrow(page, "up"):
+        if not click_strike_table_arrow(page, "up"):
             break
-        rows_data.update(parse_visible_table(page, exp_label))
+        rows_data.update(parse_three_eurex_tables(page, exp_label))
         new_min = min(rows_data.keys()) if rows_data else 999
         if new_min >= prev_min and len(rows_data) > 0:
             break
 
-    # 2. Scorre dall'alto verso il basso raccogliendo tutti gli strike e gli screenshot
+    # 2. Scorre verso il basso catturando ogni blocco
     for step_i in range(6):
-        rows_data.update(parse_visible_table(page, exp_label))
+        rows_data.update(parse_three_eurex_tables(page, exp_label))
         if take_screenshots:
             sp = f"chunk_{step_i}.png"
-            if screenshot_all_three_tables(page, sp):
+            try:
+                page.screenshot(path=sp, full_page=False)
                 screenshots.append(sp)
+            except Exception:
+                pass
 
         prev_max = max(rows_data.keys()) if rows_data else 0
-        if not click_pagination_arrow(page, "down"):
+        if not click_strike_table_arrow(page, "down"):
             break
-        rows_data.update(parse_visible_table(page, exp_label))
+        rows_data.update(parse_three_eurex_tables(page, exp_label))
         new_max = max(rows_data.keys()) if rows_data else 0
         if new_max <= prev_max:
             break
 
-    print(f"[{exp_label}] Totale strike estratti con dati: {len(rows_data)}")
+    print(f"[{exp_label}] Strike estratti: {len(rows_data)}")
     return sorted(rows_data.values(), key=lambda x: x["strike"]), screenshots
 
 
@@ -497,7 +492,17 @@ def main():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         page = context.new_page()
-        page.goto(target_url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(4000)
+        # Usa domcontentloaded per evitare timeout di rete su Eurex
+        page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(5000)
 
-   
+        try:
+            cookie_btn = page.locator(
+                "button:has-text('DECLINE ALL'), button:has-text('ACCEPT ALL'), "
+                "button:has-text('Accept'), button:has-text('Decline')"
+            )
+            if cookie_btn.count() > 0:
+                cookie_btn.first.click(timeout=3000)
+                page.wait_for_timeout(1000)
+        except Exception:
+            p
