@@ -2,7 +2,6 @@ import os
 import re
 import sys
 import csv
-import json
 import math
 import requests
 import numpy as np
@@ -110,81 +109,65 @@ def compute_put_greeks(S: float, K: float, T: float, r: float, price: float):
 
 
 def parse_visible_table(page, exp_label: str, debug_samples: list) -> dict:
-    """
-    Estrae tutte le righe visibili rimuovendo le celle spaziatrici vuote.
-    Senza celle vuote, ogni riga dati di Eurex ha 17 (desktop) o 13 (mobile) valori,
-    e lo Strike è SEMPRE al centro esatto: indice mid = len(tokens) // 2.
-    """
     raw_rows = page.evaluate(r"""() => {
         const trs = Array.from(document.querySelectorAll('tr'));
         return trs.map(tr => {
-            // Prende tutte le celle td/th non vuote
-            const cells = Array.from(tr.querySelectorAll('td, th'))
-                .map(c => c.innerText.trim())
-                .filter(t => t !== '');
-            return cells;
-        }).filter(r => r.length >= 11);
+            return Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim());
+        }).filter(r => r.length > 0);
     }""")
+
+    # Scrive il dump completo sul file di log per diagnosi
+    with open("debug_dump.txt", "w", encoding="utf-8") as f:
+        for idx, row in enumerate(raw_rows):
+            f.write(f"Row {idx}: {row}\n")
+            if len(debug_samples) < 15:
+                debug_samples.append(" | ".join(row))
 
     extracted = {}
     for tokens in raw_rows:
-        if len(debug_samples) < 4:
-            debug_samples.append(tokens)
-
-        n = len(tokens)
-        mid = n // 2
-
-        # Cerca lo Strike esattamente al centro (mid) o a ±1 di distanza
+        strike_val = 0.0
         s_idx = -1
-        for candidate_idx in [mid, mid - 1, mid + 1]:
-            if 6 <= candidate_idx < n - 6:
-                txt = tokens[candidate_idx].replace(",", "")
-                # Lo strike su Eurex ha sempre il punto decimale (.00 o .50) ed è tra 20 e 120
-                if re.match(r"^\d{2,3}\.(00|50)$", txt):
-                    val = float(txt)
-                    if 20.0 <= val <= 120.0:
-                        s_idx = candidate_idx
-                        break
+        for i, t in enumerate(tokens):
+            clean_t = t.replace(",", "").replace("€", "")
+            if re.match(r"^\d{2,3}\.(00|50)$", clean_t):
+                v = float(clean_t)
+                if 25.0 <= v <= 120.0:
+                    strike_val = v
+                    s_idx = i
+                    break
 
         if s_idx == -1:
             continue
 
-        strike = float(tokens[s_idx].replace(",", ""))
+        def get_c(idx):
+            return parse_num(tokens[idx]) if 0 <= idx < len(tokens) else 0.0
 
-        # Struttura simmetrica attorno a s_idx:
-        # Sinistra (Call): D.Settle(s_idx-6), OI(s_idx-5), Vol(s_idx-4), Last(s_idx-3), Bid(s_idx-2), Ask(s_idx-1)
-        # Destra (Put):    Bid(s_idx+1), Ask(s_idx+2), Last(s_idx+3), Vol(s_idx+4), OI(s_idx+5), D.Settle(s_idx+6)
-        extracted[strike] = {
+        extracted[strike_val] = {
             "expiration": exp_label,
-            "strike": strike,
-            "c_settle": parse_num(tokens[s_idx - 6]),
-            "c_oi": int(parse_num(tokens[s_idx - 5])),
-            "c_vol": int(parse_num(tokens[s_idx - 4])),
-            "c_last": parse_num(tokens[s_idx - 3]),
-            "c_bid": parse_num(tokens[s_idx - 2]),
-            "c_ask": parse_num(tokens[s_idx - 1]),
-            "p_bid": parse_num(tokens[s_idx + 1]),
-            "p_ask": parse_num(tokens[s_idx + 2]),
-            "p_last": parse_num(tokens[s_idx + 3]),
-            "p_vol": int(parse_num(tokens[s_idx + 4])),
-            "p_oi": int(parse_num(tokens[s_idx + 5])),
-            "p_settle": parse_num(tokens[s_idx + 6]),
+            "strike": strike_val,
+            "c_settle": get_c(s_idx - 6),
+            "c_oi": int(get_c(s_idx - 5)),
+            "c_vol": int(get_c(s_idx - 4)),
+            "c_last": get_c(s_idx - 3),
+            "c_bid": get_c(s_idx - 2),
+            "c_ask": get_c(s_idx - 1),
+            "p_bid": get_c(s_idx + 1),
+            "p_ask": get_c(s_idx + 2),
+            "p_last": get_c(s_idx + 3),
+            "p_vol": int(get_c(s_idx + 4)),
+            "p_oi": int(get_c(s_idx + 5)),
+            "p_settle": get_c(s_idx + 6),
         }
 
     return extracted
 
 
 def click_pagination_arrow(page, direction: str) -> bool:
-    """
-    Clicca la freccia ^ (up) o v (down) che si trova dentro le righe della tabella
-    (le righe di paginazione di Eurex hanno solo 1 cella non vuota o contengono un <svg>).
-    """
     clicked = page.evaluate(r"""(dir) => {
         const table = document.querySelector('table');
         if (!table) return false;
         const svgs = Array.from(table.querySelectorAll('svg'));
         if (svgs.length === 0) return false;
-
         const targetSvg = (dir === 'up') ? svgs[0] : svgs[svgs.length - 1];
         const btn = targetSvg.closest('button, td, th, tr, div') || targetSvg;
         btn.scrollIntoView({ block: 'center' });
@@ -200,10 +183,8 @@ def scrape_full_expiration(page, exp_label: str, debug_samples: list, take_scree
     rows_data = {}
     screenshots = []
 
-    # 1. Legge subito la vista iniziale (Strike 60.00 - 74.00)
     rows_data.update(parse_visible_table(page, exp_label, debug_samples))
 
-    # 2. Scorre in alto (freccia ^) per catturare gli strike 44.00 - 59.00
     for _ in range(6):
         prev_min = min(rows_data.keys()) if rows_data else 999
         if not click_pagination_arrow(page, "up"):
@@ -213,7 +194,6 @@ def scrape_full_expiration(page, exp_label: str, debug_samples: list, take_scree
         if new_min >= prev_min and len(rows_data) > 0:
             break
 
-    # 3. Scorre dall'alto verso il basso catturando ogni pagina di 15 strike
     for step_i in range(6):
         rows_data.update(parse_visible_table(page, exp_label, debug_samples))
         if take_screenshots:
@@ -232,7 +212,7 @@ def scrape_full_expiration(page, exp_label: str, debug_samples: list, take_scree
         if new_max <= prev_max:
             break
 
-    print(f"[{exp_label}] Totale strike estratti: {len(rows_data)} -> {sorted(rows_data.keys())}")
+    print(f"[{exp_label}] Totale strike estratti: {len(rows_data)}")
     return sorted(rows_data.values(), key=lambda x: x["strike"]), screenshots
 
 
@@ -329,8 +309,8 @@ def save_enriched_csv(chain: list, filepath: str, spot: float):
 def build_quant_report(exp_date_str: str, chain: list, debug_samples: list):
     valid_chain = [r for r in chain if r["expiration"] == exp_date_str]
     if not valid_chain:
-        dbg = "\n".join([f"<code>{s[:10]}</code>" for s in debug_samples[:3]])
-        return f"⚠️ Nessuna riga estratta.\nDebug righe lette:\n{dbg}", 58.00, 57.0
+        dbg = "\n".join([f"<code>{s[:45]}</code>" for s in debug_samples[:5]])
+        return f"⚠️ Nessuna riga estratta.\nPrime righe lette nel DOM:\n{dbg}", 58.00, 57.0
 
     today = datetime.utcnow()
     dte = 21
@@ -424,6 +404,7 @@ def main():
     stitched_path = "eurex_full_chain.png"
     dashboard_path = "eurex_dashboard.png"
     csv_path = "bmw_eurex_chain.csv"
+    debug_txt_path = "debug_dump.txt"
 
     all_chains = []
     front_exp = "20/11/2026"
@@ -456,7 +437,7 @@ def main():
         """)
 
         try:
-            page.wait_for_selector("table tbody tr", timeout=15000)
+            page.wait_for_selector("table tr", timeout=15000)
         except Exception:
             pass
 
@@ -510,6 +491,13 @@ def main():
             csv_path,
             f"📂 <b>bmw_eurex_chain.csv ({len(all_chains)} strike totali)</b>"
         )
+    else:
+        # Se non estrae nulla, invia il file di log debug_dump.txt per ispezione immediata
+        if os.path.exists(debug_txt_path):
+            send_telegram_document(
+                debug_txt_path,
+                "🔍 <b>DEBUG DUMP DOM EUREX</b> — <i>Analizziamo questo file per capire come il browser legge la tabella.</i>"
+            )
 
 
 if __name__ == "__main__":
