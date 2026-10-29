@@ -2,7 +2,6 @@ name: Eurex Daily Telegram Alert
 
 on:
   schedule:
-    # Esecuzione dal lunedì al venerdì alle 19:30 CET (18:30 UTC)
     - cron: '30 18 * * 1-5'
   workflow_dispatch:
 
@@ -20,7 +19,7 @@ jobs:
 
       - name: Install Dependencies & Playwright
         run: |
-          pip install requests playwright numpy scipy
+          pip install requests playwright numpy scipy pandas matplotlib
           playwright install chromium --with-deps
 
       - name: Execute Script
