@@ -1,6 +1,8 @@
 name: Eurex Daily Telegram Alert
 
 on:
+  push:
+    branches: [ main, master ]
   schedule:
     - cron: '30 18 * * 1-5'
   workflow_dispatch:
@@ -19,7 +21,7 @@ jobs:
 
       - name: Install Dependencies & Playwright
         run: |
-          pip install requests playwright numpy scipy pandas matplotlib
+          pip install requests playwright numpy scipy matplotlib pillow
           playwright install chromium --with-deps
 
       - name: Execute Script
