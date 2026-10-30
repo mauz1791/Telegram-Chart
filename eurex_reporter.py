@@ -7,7 +7,6 @@ import traceback
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image
 from datetime import datetime
 from scipy.stats import norm
 from scipy.optimize import brentq
@@ -24,14 +23,38 @@ PORTFOLIO_PMC = 74.00
 MORNINGSTAR_FV = 67.00
 RISK_FREE_RATE = 0.025
 
-# Posizione Put aperta in portafoglio
+# Tua posizione aperta in portafoglio
 OPEN_PUT_EXP = "20/11/2026"
 OPEN_PUT_STRIKE = 57.00
 OPEN_PUT_ENTRY = 1.45
 
 if not TELEGRAM_TOKEN or ":" not in TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    print("❌ ERRORE: Controlla TELEGRAM_TOKEN e TELEGRAM_CHAT_ID nei Secrets.")
+    print("ERRORE: Controlla TELEGRAM_TOKEN e TELEGRAM_CHAT_ID nei Secrets.")
     sys.exit(1)
+
+
+def send_telegram_message(text: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    for i in range(0, len(text), 3800):
+        chunk = text[i:i + 3800]
+        resp = requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": chunk,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            },
+            timeout=20
+        )
+        # Fallback automatico: se Telegram rifiuta l'HTML (errore 400), invia in testo puro
+        if not resp.ok:
+            clean_txt = re.sub(r"<[^>]+>", "", chunk)
+            requests.post(
+                url,
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": clean_txt},
+                timeout=20
+            )
 
 
 def send_telegram_photo(photo_path: str, caption: str):
@@ -39,7 +62,7 @@ def send_telegram_photo(photo_path: str, caption: str):
     with open(photo_path, "rb") as img:
         resp = requests.post(
             url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
             files={"photo": img},
             timeout=40
         )
@@ -52,24 +75,9 @@ def send_telegram_document(file_path: str, caption: str):
     with open(file_path, "rb") as doc:
         requests.post(
             url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
             files={"document": doc},
             timeout=40
-        )
-
-
-def send_telegram_message(text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for i in range(0, len(text), 4000):
-        requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text[i:i + 4000],
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            },
-            timeout=20
         )
 
 
@@ -109,207 +117,122 @@ def compute_put_greeks(S: float, K: float, T: float, r: float, price: float):
     return iv * 100.0, delta, prob_profit
 
 
-def parse_three_eurex_tables(page, exp_label: str) -> dict:
+def extract_current_view(page, exp_label: str) -> dict:
     """
-    Legge le 3 tabelle separate di Eurex (Call Table, Strike Table, Put Table)
-    e le unisce indice per indice (riga 0..14).
+    Legge le 3 tabelle di Eurex SENZA filtrare le celle vuote:
+    - Tabella Call (11 colonne): [-7]=D.Settle, [-6]=OI, [-5]=Vol, [-4]=Last, [-3]=Bid, [-2]=Ask
+    - Tabella Strike (1 colonna): [0]=Strike (es. 54.00 .. 68.00)
+    - Tabella Put (11 colonne): [1]=Bid, [2]=Ask, [3]=Last, [4]=Vol, [5]=OI, [6]=D.Settle
     """
-    data = page.evaluate(r"""() => {
-        const tables = Array.from(document.querySelectorAll('table'));
-        let strikeList = [];
-        let dataTables = [];
+    raw = page.evaluate(r"""() => {
+        const trs = Array.from(document.querySelectorAll('tr')).map(tr =>
+            Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim())
+        );
 
-        for (const t of tables) {
-            const rows = Array.from(t.querySelectorAll('tbody tr, tr')).map(tr =>
-                Array.from(tr.querySelectorAll('td, th'))
-                    .map(c => c.innerText.trim())
-                    .filter(txt => txt !== '')
-            ).filter(r => r.length > 0);
+        const strikes = [];
+        const elevenColRows = [];
 
-            // Controlla se è la tabella centrale degli Strike (righe da 1 sola cella XX.00 / XX.50)
-            const singleStrikeRows = rows.filter(r => r.length === 1 && /^\d{2,3}\.(00|50)$/.test(r[0]));
-            if (singleStrikeRows.length >= 5) {
-                strikeList = singleStrikeRows.map(r => parseFloat(r[0]));
+        for (const r of trs) {
+            // Righe della tabella centrale Strike (1 sola cella con formato XX.00 o XX.50)
+            const nonEmpty = r.filter(x => x !== '');
+            if (nonEmpty.length === 1 && /^\d{2,3}\.(00|50)$/.test(nonEmpty[0])) {
+                const v = parseFloat(nonEmpty[0]);
+                if (v >= 25 && v <= 120) strikes.push(v);
                 continue;
             }
-
-            // Controlla se è una tabella dati Call o Put (righe con almeno 6 valori numerici o '-')
-            const validDataRows = rows.filter(r =>
-                r.length >= 6 &&
-                !r.some(cell => /strike|settle|volume|total/i.test(cell)) &&
-                r.filter(cell => /^(-|\d[\d,.]*)$/.test(cell)).length >= 6
-            );
-            if (validDataRows.length >= 5) {
-                dataTables.push(validDataRows);
+            // Righe dati delle tabelle Call e Put (hanno tra 9 e 12 celle totali incluse le vuote)
+            if (r.length >= 9 && r.length <= 13) {
+                const joined = r.join(' ').toLowerCase();
+                if (!joined.includes('settle') && !joined.includes('volume') && !joined.includes('total')) {
+                    elevenColRows.push(r);
+                }
             }
         }
-
-        // Caso fallback: se fosse una singola tabella unificata
-        if (strikeList.length === 0) {
-            const allTrs = Array.from(document.querySelectorAll('tr')).map(tr =>
-                Array.from(tr.querySelectorAll('td, th')).map(c => c.innerText.trim()).filter(x => x !== '')
-            ).filter(r => r.length >= 13);
-            return { mode: 'single', rows: allTrs };
-        }
-
-        return {
-            mode: 'three_tables',
-            strikes: strikeList,
-            callRows: dataTables.length >= 1 ? dataTables[0] : [],
-            putRows: dataTables.length >= 2 ? dataTables[1] : []
-        };
+        return { strikes: strikes, dataRows: elevenColRows };
     }""")
 
+    strikes = raw.get("strikes", [])
+    data_rows = raw.get("dataRows", [])
+    n = len(strikes)
     extracted = {}
 
-    if data.get("mode") == "three_tables":
-        strikes = data.get("strikes", [])
-        call_rows = data.get("callRows", [])
-        put_rows = data.get("putRows", [])
-        n = min(len(strikes), len(call_rows), len(put_rows))
+    if n == 0:
+        return extracted
 
-        for i in range(n):
-            k = float(strikes[i])
-            if not (25.0 <= k <= 120.0):
-                continue
-            c_r = call_rows[i]
-            p_r = put_rows[i]
+    # Le prime N righe dati appartengono alla tabella Call, le successive N alla tabella Put
+    call_rows = data_rows[:n] if len(data_rows) >= n else []
+    put_rows = data_rows[n:2 * n] if len(data_rows) >= 2 * n else []
 
-            # Nella tabella Call (a sinistra), le ultime 6 colonne sono: D.Settle, OI adj, Volume, Last, Bid, Ask
-            c_6 = c_r[-6:] if len(c_r) >= 6 else (["0"] * (6 - len(c_r)) + c_r)
-            # Nella tabella Put (a destra), le prime 6 colonne sono: Bid, Ask, Last, Volume, OI adj, D.Settle
-            p_6 = p_r[:6] if len(p_r) >= 6 else (p_r + ["0"] * (6 - len(p_r)))
+    for i, k in enumerate(strikes):
+        c_r = call_rows[i] if i < len(call_rows) else []
+        p_r = put_rows[i] if i < len(put_rows) else []
 
-            extracted[k] = {
-                "expiration": exp_label,
-                "strike": k,
-                "c_settle": parse_num(c_6[0]),
-                "c_oi": int(parse_num(c_6[1])),
-                "c_vol": int(parse_num(c_6[2])),
-                "c_last": parse_num(c_6[3]),
-                "c_bid": parse_num(c_6[4]),
-                "c_ask": parse_num(c_6[5]),
-                "p_bid": parse_num(p_6[0]),
-                "p_ask": parse_num(p_6[1]),
-                "p_last": parse_num(p_6[2]),
-                "p_vol": int(parse_num(p_6[3])),
-                "p_oi": int(parse_num(p_6[4])),
-                "p_settle": parse_num(p_6[5]),
-            }
+        # Call: se l'ultima cella è vuota (barra verde), scorre di 1 a sinistra
+        c_end = len(c_r) - 1 if (c_r and c_r[-1] == "") else len(c_r)
+        # Put: se la prima cella è vuota (barra verde), parte dall'indice 1
+        p_start = 1 if (p_r and p_r[0] == "") else 0
 
-    elif data.get("mode") == "single":
-        for r in data.get("rows", []):
-            mid = len(r) // 2
-            k = parse_num(r[mid])
-            if 25.0 <= k <= 120.0:
-                extracted[k] = {
-                    "expiration": exp_label,
-                    "strike": k,
-                    "c_settle": parse_num(r[mid - 6]),
-                    "c_oi": int(parse_num(r[mid - 5])),
-                    "c_vol": int(parse_num(r[mid - 4])),
-                    "c_last": parse_num(r[mid - 3]),
-                    "c_bid": parse_num(r[mid - 2]),
-                    "c_ask": parse_num(r[mid - 1]),
-                    "p_bid": parse_num(r[mid + 1]),
-                    "p_ask": parse_num(r[mid + 2]),
-                    "p_last": parse_num(r[mid + 3]),
-                    "p_vol": int(parse_num(r[mid + 4])),
-                    "p_oi": int(parse_num(r[mid + 5])),
-                    "p_settle": parse_num(r[mid + 6]),
-                }
+        def get_c(idx):
+            return parse_num(c_r[idx]) if 0 <= idx < len(c_r) else 0.0
+
+        def get_p(idx):
+            return parse_num(p_r[idx]) if 0 <= idx < len(p_r) else 0.0
+
+        extracted[k] = {
+            "expiration": exp_label,
+            "strike": float(k),
+            "c_settle": get_c(c_end - 6),
+            "c_oi": int(get_c(c_end - 5)),
+            "c_vol": int(get_c(c_end - 4)),
+            "c_last": get_c(c_end - 3),
+            "c_bid": get_c(c_end - 2),
+            "c_ask": get_c(c_end - 1),
+            "p_bid": get_p(p_start + 0),
+            "p_ask": get_p(p_start + 1),
+            "p_last": get_p(p_start + 2),
+            "p_vol": int(get_p(p_start + 3)),
+            "p_oi": int(get_p(p_start + 4)),
+            "p_settle": get_p(p_start + 5),
+        }
 
     return extracted
 
 
-def click_strike_table_arrow(page, direction: str) -> bool:
-    """
-    Cerca le frecce ^ (up) e v (down) specificamente dentro la tabella centrale degli Strike.
-    """
+def click_arrow(page, direction: str) -> bool:
     clicked = page.evaluate(r"""(dir) => {
-        const tables = Array.from(document.querySelectorAll('table'));
-        let strikeTable = null;
-        for (const t of tables) {
-            if (t.innerText.includes('Strike')) {
-                strikeTable = t;
-                break;
-            }
-        }
-        const scope = strikeTable || document;
-        const svgs = Array.from(scope.querySelectorAll('tbody svg, tr svg'));
+        const svgs = Array.from(document.querySelectorAll('table svg'));
         if (svgs.length === 0) return false;
-
-        const targetSvg = (dir === 'up') ? svgs[0] : svgs[svgs.length - 1];
-        const btn = targetSvg.closest('button, td, th, tr, div') || targetSvg;
-        btn.scrollIntoView({ block: 'center' });
-        if (typeof btn.click === 'function') {
-            btn.click();
-        } else {
-            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        }
+        const target = (dir === 'up') ? svgs[0] : svgs[svgs.length - 1];
+        const btn = target.closest('button, td, th, tr, div') || target;
+        if (typeof btn.click === 'function') btn.click();
         return true;
     }""", direction)
     if clicked:
-        page.wait_for_timeout(900)
+        page.wait_for_timeout(800)
     return bool(clicked)
 
 
-def scrape_full_expiration(page, exp_label: str, take_screenshots: bool = False):
+def scrape_expiration(page, exp_label: str):
     rows_data = {}
-    screenshots = []
+    rows_data.update(extract_current_view(page, exp_label))
 
-    rows_data.update(parse_three_eurex_tables(page, exp_label))
-
-    # 1. Clicca la freccia SU (^) fino agli strike minimi (44€ - 53€)
-    for _ in range(5):
+    for _ in range(4):
         prev_min = min(rows_data.keys()) if rows_data else 999
-        if not click_strike_table_arrow(page, "up"):
+        if not click_arrow(page, "up"):
             break
-        rows_data.update(parse_three_eurex_tables(page, exp_label))
-        new_min = min(rows_data.keys()) if rows_data else 999
-        if new_min >= prev_min and len(rows_data) > 0:
+        rows_data.update(extract_current_view(page, exp_label))
+        if (min(rows_data.keys()) if rows_data else 999) >= prev_min:
             break
 
-    # 2. Scorre verso il basso catturando ogni blocco
-    for step_i in range(6):
-        rows_data.update(parse_three_eurex_tables(page, exp_label))
-        if take_screenshots:
-            sp = f"chunk_{step_i}.png"
-            try:
-                page.screenshot(path=sp, full_page=False)
-                screenshots.append(sp)
-            except Exception:
-                pass
-
+    for _ in range(5):
         prev_max = max(rows_data.keys()) if rows_data else 0
-        if not click_strike_table_arrow(page, "down"):
+        if not click_arrow(page, "down"):
             break
-        rows_data.update(parse_three_eurex_tables(page, exp_label))
-        new_max = max(rows_data.keys()) if rows_data else 0
-        if new_max <= prev_max:
+        rows_data.update(extract_current_view(page, exp_label))
+        if (max(rows_data.keys()) if rows_data else 0) <= prev_max:
             break
 
-    print(f"[{exp_label}] Strike estratti: {len(rows_data)}")
-    return sorted(rows_data.values(), key=lambda x: x["strike"]), screenshots
-
-
-def stitch_images_vertically(image_paths: list, output_path: str):
-    valid_imgs = [Image.open(p) for p in image_paths if os.path.exists(p)]
-    if not valid_imgs:
-        return False
-    unique_imgs = [valid_imgs[0]]
-    for im in valid_imgs[1:]:
-        if list(im.getdata()) != list(unique_imgs[-1].getdata()):
-            unique_imgs.append(im)
-
-    widths, heights = zip(*(i.size for i in unique_imgs))
-    stitched = Image.new("RGB", (max(widths), sum(heights)), (255, 255, 255))
-    y_offset = 0
-    for im in unique_imgs:
-        stitched.paste(im, (0, y_offset))
-        y_offset += im.size[1]
-    stitched.save(output_path)
-    return True
+    return sorted(rows_data.values(), key=lambda x: x["strike"])
 
 
 def generate_dashboard_chart(chain: list, exp_date_str: str, spot: float, max_pain: float, out_path: str):
@@ -326,14 +249,14 @@ def generate_dashboard_chart(chain: list, exp_date_str: str, spot: float, max_pa
     x = np.arange(len(strikes))
     width = 0.38
 
-    ax.bar(x - width / 2, c_oi, width, label="Call Open Interest (Resistenze)", color="#00d2ff", alpha=0.85)
-    ax.bar(x + width / 2, p_oi, width, label="Put Open Interest (Supporti)", color="#ff4b4b", alpha=0.85)
+    ax.bar(x - width / 2, c_oi, width, label="Call OI (Resistenze)", color="#00d2ff", alpha=0.85)
+    ax.bar(x + width / 2, p_oi, width, label="Put OI (Supporti)", color="#ff4b4b", alpha=0.85)
 
     ax.set_xticks(x)
     ax.set_xticklabels([f"{s:.0f}€" if s.is_integer() else f"{s:.1f}€" for s in strikes], rotation=45, fontsize=9)
-    ax.set_ylabel("Contratti Aperti (Open Interest)", fontsize=10)
+    ax.set_ylabel("Open Interest (Contratti)", fontsize=10)
     ax.set_title(
-        f"BMW Eurex Options — Mappa Open Interest ({exp_date_str}) | Spot: {spot:.2f}€ | Max Pain: {max_pain:.1f}€",
+        f"BMW Eurex Options ({exp_date_str}) | Spot: {spot:.2f}€ | Max Pain: {max_pain:.1f}€",
         fontsize=12, fontweight="bold", pad=15
     )
     ax.grid(axis="y", linestyle="--", alpha=0.25)
@@ -386,7 +309,7 @@ def save_enriched_csv(chain: list, filepath: str, spot: float):
 def build_quant_report(exp_date_str: str, chain: list):
     valid_chain = [r for r in chain if r["expiration"] == exp_date_str]
     if not valid_chain:
-        return "⚠️ Nessuna riga estratta.", 58.00, 57.0
+        return "⚠️ Nessuna riga estratta.", 57.50, 57.0
 
     today = datetime.utcnow()
     dte = 21
@@ -405,7 +328,7 @@ def build_quant_report(exp_date_str: str, chain: list):
             p_p = row["p_settle"] or row["p_last"]
             if c_p > 0.05 and p_p > 0.05:
                 spot_estimates.append(k + c_p - p_p)
-    spot = float(np.median(spot_estimates)) if spot_estimates else 58.00
+    spot = float(np.median(spot_estimates)) if spot_estimates else 57.50
 
     tot_c_oi = sum(r["c_oi"] for r in valid_chain)
     tot_p_oi = sum(r["p_oi"] for r in valid_chain)
@@ -443,7 +366,7 @@ def build_quant_report(exp_date_str: str, chain: list):
         icon = "🟢" if pnl_eur >= 0 else "🔴"
         msg += f"💼 <b>TUA POSIZIONE: SHORT PUT {OPEN_PUT_STRIKE:.2f}€ @ {OPEN_PUT_ENTRY:.2f}€</b>\n"
         msg += f"• <b>Quota Ora:</b> <code>{curr_p:.2f} €</code> (B/A: {my_put['p_bid']:.2f}/{my_put['p_ask']:.2f})\n"
-        msg += f"• <b>P&L Aperto:</b> {icon} <b>{pnl_eur:+.2f} €</b> (<code>{pnl_pct:+.1f}%</code>) | <b>TP 50%:</b> <code>0.72 €</code>\n\n"
+        msg += f"• <b>P&amp;L Aperto:</b> {icon} <b>{pnl_eur:+.2f} €</b> (<code>{pnl_pct:+.1f}%</code>) | <b>TP 50%:</b> <code>0.72 €</code>\n\n"
 
     msg += "🧱 <b>ARCHITETTURA ISTITUZIONALE</b>\n"
     msg += f"• <b>Max Pain:</b> <code>{max_pain_strike:.2f} €</code>\n"
@@ -453,13 +376,13 @@ def build_quant_report(exp_date_str: str, chain: list):
     msg += f"• <b>Volumi Oggi:</b> C <code>{tot_c_vol:,}</code> | P <code>{tot_p_vol:,}</code>\n"
     msg += f"• <b>Expected Move (1 SD):</b> <code>±{exp_move:.2f} €</code> (<code>{spot - exp_move:.2f}€</code> ↔️ <code>{spot + exp_move:.2f}€</code>)\n\n"
 
-    msg += "🎯 <b>SCANNER PUT & ROLL</b>\n"
+    msg += "🎯 <b>SCANNER PUT E ROLL</b>\n"
     for r in valid_chain:
         k = r["strike"]
-        if not ((spot - 6.5) <= k <= (spot + 1.0)):
+        if not ((spot - 6.5) <= k <= (spot + 1.5)):
             continue
         prem = r["p_last"] or r["p_settle"]
-        if prem <= 0.10:
+        if prem <= 0.05:
             continue
         iv, delta, prob_prof = compute_put_greeks(spot, k, T, RISK_FREE_RATE, prem)
         be = k - prem
@@ -476,14 +399,15 @@ def build_quant_report(exp_date_str: str, chain: list):
 
 
 def main():
+    # Ping immediato su Telegram per confermare che il job è attivo
+    send_telegram_message("⏳ Avvio lettura catena opzioni Eurex BMW in corso...")
+
     target_url = "https://www.eurex.com/ex-en/markets/equ/equ-opt/options/BMW-950222"
-    stitched_path = "eurex_full_chain.png"
     dashboard_path = "eurex_dashboard.png"
     csv_path = "bmw_eurex_chain.csv"
 
     all_chains = []
     front_exp = "20/11/2026"
-    chunk_files = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -492,7 +416,6 @@ def main():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
         page = context.new_page()
-        # Usa domcontentloaded per evitare timeout di rete su Eurex
         page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(5000)
 
@@ -505,4 +428,60 @@ def main():
                 cookie_btn.first.click(timeout=3000)
                 page.wait_for_timeout(1000)
         except Exception:
-            p
+            pass
+
+        try:
+            page.wait_for_selector("table tr", timeout=15000)
+            page.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+        exp_dates = []
+        try:
+            for b_text in page.locator("button").all_inner_texts():
+                m = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", b_text)
+                if m and m.group(1) not in exp_dates:
+                    exp_dates.append(m.group(1))
+        except Exception:
+            pass
+
+        if exp_dates:
+            front_exp = exp_dates[0]
+
+        for idx, exp_label in enumerate(exp_dates[:2]):
+            if idx > 0:
+                try:
+                    page.locator(f"button:has-text('{exp_label}')").first.click(timeout=3000)
+                    page.wait_for_timeout(2500)
+                except Exception:
+                    continue
+            chain_part = scrape_expiration(page, exp_label)
+            all_chains.extend(chain_part)
+
+        browser.close()
+
+    quant_report, spot, max_pain = build_quant_report(front_exp, all_chains)
+
+    if generate_dashboard_chart(all_chains, front_exp, spot, max_pain, dashboard_path):
+        send_telegram_photo(
+            dashboard_path,
+            f"📊 MAPPA OPEN INTEREST EUREX BMW ({front_exp})"
+        )
+
+    send_telegram_message(quant_report)
+
+    if all_chains:
+        save_enriched_csv(all_chains, csv_path, spot)
+        send_telegram_document(
+            csv_path,
+            f"📂 bmw_eurex_chain.csv ({len(all_chains)} strike totali)"
+        )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        err_clean = traceback.format_exc()[-1200:].replace("<", "(").replace(">", ")").replace("&", "e")
+        send_telegram_message(f"❌ ERRORE SCRIPT EUREX:\n{err_clean}")
+        sys.exit(1)
