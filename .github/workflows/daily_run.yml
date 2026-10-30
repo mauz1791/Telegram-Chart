@@ -21,7 +21,7 @@ jobs:
 
       - name: Install Dependencies & Playwright
         run: |
-          pip install requests playwright numpy scipy matplotlib pillow
+          pip install requests playwright numpy scipy pandas matplotlib pillow yfinance
           playwright install chromium --with-deps
 
       - name: Execute Script
