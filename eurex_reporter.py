@@ -2,11 +2,15 @@ import os
 import re
 import sys
 import csv
+import json
 import math
 import traceback
 import requests
 import numpy as np
 import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 import matplotlib.pyplot as plt
 from datetime import datetime
 from scipy.stats import norm
@@ -161,17 +165,12 @@ def parse_num(val) -> float:
 
 
 def get_live_price(bid: float, ask: float, last: float, settle: float) -> float:
-    """
-    Usa la media Bid/Ask (Mid Price) quando il book è attivo a mercati aperti;
-    altrimenti usa Last o D. Settle a mercati chiusi.
-    """
     if bid > 0.0 and ask > 0.0:
         return round((bid + ask) / 2.0, 4)
     return last or settle or ask or bid or 0.0
 
 
 def fetch_yf_technicals(yf_symbol: str) -> dict:
-    """Scarica Prezzo Spot Xetra, RSI(14), Volatilità Storica HV20 e SMA50 da Yahoo Finance."""
     info = {"spot": 0.0, "rsi": 50.0, "hv20": 0.0, "sma50": 0.0}
     if not HAS_YF or not yf_symbol:
         return info
@@ -448,7 +447,6 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
         pass
     T = dte / 365.0
 
-    # Priorità 1: Spot da Yahoo Finance Xetra o Put-Call Parity basata su Mid Price Live
     spot_mid_estimates = []
     spot_settle_estimates = []
     for row in valid_chain:
@@ -521,11 +519,10 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
     msg += f"💶 <b>Spot Live:</b> <code>{spot:.2f} €</code> | <b>PMC:</b> <code>{pmc:.2f} €</code> (<code>{stock_pl:+.0f}€ / {stock_pl_pct:+.1f}%</code>) | <b>FV:</b> <code>{fv:.0f} €</code>\n"
     msg += f"📈 <b>RSI(14):</b> <code>{tech['rsi']:.1f}</code> | <b>SMA50:</b> <code>{tech['sma50']:.2f}€</code> | {vol_edge_str}\n\n"
 
-    # Sezione 1: Monitoraggio Posizioni Opzioni Aperte (Prezzo Live Mid)
     open_opts = cfg.get("open_options", [])
     ticker_opt_pl = 0.0
     if open_opts:
-        msg += f"💼 <b>POSIZIONI OPZIONI APERTE SU {ticker} (Valutazione Mid Live):</b>\n"
+        msg += f"💼 <b>POSIZIONI OPZIONI APERTE SU {ticker} (Mid Live):</b>\n"
         for pos in open_opts:
             match = next((r for r in chain if r["ticker"] == ticker and r["expiration"] == pos["exp"] and abs(r["strike"] - pos["strike"]) < 0.01), None)
             curr_val = pos["entry"]
@@ -565,7 +562,6 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
     if not any(o["side"] == "SHORT" for o in open_opts):
         alerts_out.append(f"🔵 <b>{ticker}</b>: Nessuna opzione Short attiva (RSI {tech['rsi']:.0f}) -> Valuta ingresso Ruota.")
 
-    # Sezione 2: Muri Istituzionali
     msg += "🧱 <b>ARCHITETTURA ISTITUZIONALE</b>\n"
     msg += f"• <b>Max Pain:</b> <code>{max_pain_strike:.2f} €</code>\n"
     msg += f"• <b>Put Wall:</b> <code>{put_wall['strike']:.2f} €</code> ({put_wall['p_oi']:,} OI)\n"
@@ -574,7 +570,6 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
     msg += f"• <b>Volumi Oggi:</b> C <code>{tot_c_vol:,}</code> | P <code>{tot_p_vol:,}</code>\n"
     msg += f"• <b>Expected Move (1 SD):</b> <code>±{exp_move:.2f} €</code> (<code>{spot - exp_move:.2f}€</code> ↔️ <code>{spot + exp_move:.2f}€</code>)\n\n"
 
-    # Sezione 3: Scanner Cash-Secured Put (Valutato su Mid Price Live)
     msg += "🎯 <b>LATO PUT (Vendita Put / Mediazione PMC)</b>\n"
     for r in valid_chain:
         k = r["strike"]
@@ -594,7 +589,6 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
             f"Ann: <b>{ann_roc:.1f}%</b> | PMC 200az: <code>{new_pmc:.2f}€</code>\n"
         )
 
-    # Sezione 4: Scanner Covered Call (Valutato su Mid Price Live >= 0.20 €)
     msg += "\n🛡️ <b>LATO CALL (Vendita Covered Call >= 0.20€)</b>\n"
     found_call = False
     for r in valid_chain:
@@ -619,69 +613,160 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
     return msg, spot, max_pain_strike, stock_pl, ticker_opt_pl
 
 
-def save_multi_ticker_csv(all_chains: list, spots_by_ticker: dict, filepath: str):
-    if not all_chains:
-        return
-    fieldnames = [
-        "ticker", "expiration", "dte", "spot_implied", "strike",
-        "c_settle", "c_bid", "c_ask", "c_mid", "c_last", "c_vol", "c_oi",
-        "p_bid", "p_ask", "p_mid", "p_last", "p_settle", "p_vol", "p_oi",
-        "put_iv_pct", "put_delta", "put_prob_profit_pct", "put_breakeven", "put_roc_ann_pct",
-        "call_iv_pct", "call_delta", "call_roc_ann_pct"
-    ]
+def prepare_enriched_rows(all_chains: list, spots_by_ticker: dict) -> list:
     today = datetime.utcnow()
-    with open(filepath, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in all_chains:
-            tkr = r["ticker"]
-            spot = spots_by_ticker.get(tkr, 50.0)
-            dte = 20
-            try:
-                exp_dt = datetime.strptime(r["expiration"], "%d/%m/%Y")
-                dte = max(1, (exp_dt - today).days)
-            except Exception:
-                pass
-            T = dte / 365.0
+    enriched = []
+    for r in all_chains:
+        tkr = r["ticker"]
+        spot = spots_by_ticker.get(tkr, 50.0)
+        pmc = WATCHLIST.get(tkr, {}).get("pmc", spot)
+        dte = 20
+        try:
+            exp_dt = datetime.strptime(r["expiration"], "%d/%m/%Y")
+            dte = max(1, (exp_dt - today).days)
+        except Exception:
+            pass
+        T = dte / 365.0
 
-            p_mid = get_live_price(r["p_bid"], r["p_ask"], r["p_last"], r["p_settle"])
-            p_iv, p_delta, p_prob = compute_put_greeks(spot, r["strike"], T, RISK_FREE_RATE, p_mid)
-            p_be = (r["strike"] - p_mid) if p_mid > 0 else r["strike"]
-            p_roc = (((p_mid / p_be) * 100.0) * (365.0 / dte)) if (p_mid > 0 and p_be > 0) else 0.0
+        p_mid = get_live_price(r["p_bid"], r["p_ask"], r["p_last"], r["p_settle"])
+        p_iv, p_delta, p_prob = compute_put_greeks(spot, r["strike"], T, RISK_FREE_RATE, p_mid)
+        p_be = (r["strike"] - p_mid) if p_mid > 0 else r["strike"]
+        p_roc = (((p_mid / p_be) * 100.0) * (365.0 / dte)) if (p_mid > 0 and p_be > 0) else 0.0
+        new_pmc_200 = (pmc + p_be) / 2.0
 
-            c_mid = get_live_price(r["c_bid"], r["c_ask"], r["c_last"], r["c_settle"])
-            c_iv, c_delta, _ = compute_call_greeks(spot, r["strike"], T, RISK_FREE_RATE, c_mid)
-            c_roc = (((c_mid / spot) * 100.0) * (365.0 / dte)) if (c_mid > 0 and spot > 0) else 0.0
+        c_mid = get_live_price(r["c_bid"], r["c_ask"], r["c_last"], r["c_settle"])
+        c_iv, c_delta, c_prob = compute_call_greeks(spot, r["strike"], T, RISK_FREE_RATE, c_mid)
+        c_roc = (((c_mid / spot) * 100.0) * (365.0 / dte)) if (c_mid > 0 and spot > 0) else 0.0
 
-            row_out = dict(r)
-            row_out.update({
-                "dte": dte,
-                "spot_implied": round(spot, 2),
-                "c_mid": round(c_mid, 4),
-                "p_mid": round(p_mid, 4),
-                "put_iv_pct": round(p_iv, 2),
-                "put_delta": round(p_delta, 3),
-                "put_prob_profit_pct": round(p_prob, 1),
-                "put_breakeven": round(p_be, 2),
-                "put_roc_ann_pct": round(p_roc, 2),
-                "call_iv_pct": round(c_iv, 2),
-                "call_delta": round(c_delta, 3),
-                "call_roc_ann_pct": round(c_roc, 2),
-            })
-            writer.writerow(row_out)
+        row_out = dict(r)
+        row_out.update({
+            "dte": dte,
+            "spot_implied": round(spot, 2),
+            "c_mid": round(c_mid, 4),
+            "p_mid": round(p_mid, 4),
+            "put_iv_pct": round(p_iv, 2),
+            "put_delta": round(p_delta, 3),
+            "put_prob_profit_pct": round(p_prob, 1),
+            "put_breakeven": round(p_be, 2),
+            "put_roc_ann_pct": round(p_roc, 2),
+            "new_pmc_200": round(new_pmc_200, 2),
+            "call_iv_pct": round(c_iv, 2),
+            "call_delta": round(c_delta, 3),
+            "call_prob_otm_pct": round(c_prob, 1),
+            "call_roc_ann_pct": round(c_roc, 2),
+        })
+        enriched.append(row_out)
+    return enriched
+
+
+def generate_excel_workbook(enriched_rows: list, spots_by_ticker: dict, tech_by_ticker: dict, excel_path: str):
+    wb = openpyxl.Workbook()
+    header_fill = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    green_fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")
+    red_fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")
+
+    # 1. Scheda Portafoglio & Posizioni
+    ws1 = wb.active
+    ws1.title = "1_Portafoglio_Live"
+    ws1.append(["PORTAFOGLIO AZIONI XETRA (5 LOTTI DA 100 AZIONI)"])
+    ws1.append(["Ticker", "Nome", "Azioni", "Spot Live €", "Tuo PMC €", "Fair Value €", "P/L Azioni €", "P/L %", "RSI(14)", "HV20 %"])
+    for cell in ws1[2]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    for tkr, cfg in WATCHLIST.items():
+        spot = spots_by_ticker.get(tkr, cfg["pmc"])
+        tech = tech_by_ticker.get(tkr, {"rsi": 50.0, "hv20": 0.0})
+        pl_eur = (spot - cfg["pmc"]) * cfg["shares"]
+        pl_pct = ((spot - cfg["pmc"]) / cfg["pmc"]) * 100.0
+        ws1.append([tkr, cfg["name"], cfg["shares"], round(spot, 2), cfg["pmc"], cfg["fair_value"], round(pl_eur, 2), round(pl_pct, 2), round(tech["rsi"], 1), round(tech["hv20"], 1)])
+
+    ws1.append([])
+    ws1.append(["POSIZIONI OPZIONI EUREX APERTE (VALUTAZIONE MID LIVE)"])
+    hdr_row = ws1.max_row + 1
+    ws1.append(["Ticker", "Tipo", "Lato", "Strike €", "Scadenza", "PMC Opzione €", "Mid Live €", "Bid €", "Ask €", "P/L €", "P/L %", "Target 50% €"])
+    for cell in ws1[hdr_row]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    for tkr, cfg in WATCHLIST.items():
+        for pos in cfg.get("open_options", []):
+            match = next((r for r in enriched_rows if r["ticker"] == tkr and r["expiration"] == pos["exp"] and abs(r["strike"] - pos["strike"]) < 0.01), None)
+            curr_val = pos["entry"]
+            bid_v, ask_v = 0.0, 0.0
+            if match:
+                if pos["type"] == "P":
+                    bid_v, ask_v, curr_val = match["p_bid"], match["p_ask"], match["p_mid"] or pos["entry"]
+                else:
+                    bid_v, ask_v, curr_val = match["c_bid"], match["c_ask"], match["c_mid"] or pos["entry"]
+            pnl_eur = (pos["entry"] - curr_val) * 100.0 if pos["side"] == "SHORT" else (curr_val - pos["entry"]) * 100.0
+            pnl_pct = (pnl_eur / (pos["entry"] * 100.0)) * 100.0 if pos["entry"] > 0 else 0.0
+            tp50 = round(pos["entry"] * 0.50, 2) if pos["side"] == "SHORT" else "-"
+            ws1.append([tkr, "PUT" if pos["type"] == "P" else "CALL", pos["side"], pos["strike"], pos["exp"], pos["entry"], round(curr_val, 3), bid_v, ask_v, round(pnl_eur, 2), round(pnl_pct, 1), tp50])
+            ws1.cell(row=ws1.max_row, column=10).fill = green_fill if pnl_eur >= 0 else red_fill
+
+    # 2. Scheda Scanner Put (Ruota & Mediazione PMC)
+    ws2 = wb.create_sheet("2_Scanner_Put")
+    ws2.append(["Ticker", "Scadenza", "DTE", "Spot Live €", "Strike Put €", "Mid Live €", "Bid €", "Ask €", "Delta", "Prob. Profit %", "Break-Even €", "ROC Annuo %", "Nuovo PMC (200 az) €", "Put OI", "Put Vol Oggi"])
+    for cell in ws2[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    put_cands = [r for r in enriched_rows if -0.45 <= r["put_delta"] <= -0.12 and r["p_mid"] >= 0.10]
+    put_cands.sort(key=lambda x: x["put_roc_ann_pct"], reverse=True)
+    for r in put_cands:
+        ws2.append([r["ticker"], r["expiration"], r["dte"], r["spot_implied"], r["strike"], r["p_mid"], r["p_bid"], r["p_ask"], r["put_delta"], r["put_prob_profit_pct"], r["put_breakeven"], r["put_roc_ann_pct"], r["new_pmc_200"], r["p_oi"], r["p_vol"]])
+        if -0.32 <= r["put_delta"] <= -0.20:
+            ws2.cell(row=ws2.max_row, column=12).fill = green_fill
+
+    # 3. Scheda Scanner Covered Call
+    ws3 = wb.create_sheet("3_Scanner_Call")
+    ws3.append(["Ticker", "Scadenza", "DTE", "Spot Live €", "Tuo PMC €", "Strike Call €", "Mid Live €", "Bid €", "Ask €", "Delta", "Prob. OTM %", "Yield Annuo %", "Call OI", "Call Vol Oggi"])
+    for cell in ws3[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    call_cands = [r for r in enriched_rows if 0.10 <= r["call_delta"] <= 0.45 and r["c_mid"] >= 0.20 and r["strike"] > r["spot_implied"]]
+    call_cands.sort(key=lambda x: x["call_roc_ann_pct"], reverse=True)
+    for r in call_cands:
+        pmc_t = WATCHLIST.get(r["ticker"], {}).get("pmc", 0.0)
+        ws3.append([r["ticker"], r["expiration"], r["dte"], r["spot_implied"], pmc_t, r["strike"], r["c_mid"], r["c_bid"], r["c_ask"], r["call_delta"], r["call_prob_otm_pct"], r["call_roc_ann_pct"], r["c_oi"], r["c_vol"]])
+
+    # 4. Scheda Catena Completa
+    ws4 = wb.create_sheet("4_Catena_Completa")
+    if enriched_rows:
+        keys = list(enriched_rows[0].keys())
+        ws4.append(keys)
+        for cell in ws4[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+        for r in enriched_rows:
+            ws4.append([r[k] for k in keys])
+
+    for ws in [ws1, ws2, ws3, ws4]:
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(max_len + 3, 11), 30)
+
+    wb.save(excel_path)
 
 
 def main():
     tickers_list = ", ".join(WATCHLIST.keys())
-    send_telegram_message(f"⏳ <b>Centro di Controllo Wheel Strategy (Live Mid)</b>\nAvvio scansione completa per: <code>{tickers_list}</code>...")
+    send_telegram_message(f"⏳ <b>Centro di Controllo Wheel Strategy (Live Mid)</b>\nAvvio scansione per: <code>{tickers_list}</code>...")
 
     all_chains = []
     spots_by_ticker = {}
+    tech_by_ticker = {}
     alerts = []
     total_stock_pl = 0.0
     total_opt_pl = 0.0
     total_short_put_margin = 0.0
+
     csv_path = "eurex_wheel_chains.csv"
+    excel_path = "Wheel_Control_Center.xlsx"
+    json_path = "wheel_data.json"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -697,6 +782,7 @@ def main():
                     total_short_put_margin += o["strike"] * 100.0
 
             tech = fetch_yf_technicals(cfg.get("yf_ticker", ""))
+            tech_by_ticker[ticker] = tech
 
             try:
                 ok = open_eurex_option_page(page, ticker, cfg)
@@ -743,19 +829,28 @@ def main():
     summary_msg += f"• <b>P&amp;L Aperto Opzioni Eurex (Mid Live):</b> <code>{total_opt_pl:+.2f} €</code>\n"
     summary_msg += f"• <b>Margine Cash-Secured Put Impegnato:</b> <code>{total_short_put_margin:,.0f} €</code>\n\n"
     summary_msg += "🚦 <b>SEMAFORO OPERATIVO DI OGGI:</b>\n"
-    if alerts:
-        summary_msg += "\n".join(alerts)
-    else:
-        summary_msg += "• Tutte le posizioni procedono regolarmente (Theta decay attivo)."
-
+    summary_msg += "\n".join(alerts) if alerts else "• Tutte le posizioni procedono regolarmente (Theta decay attivo)."
     send_telegram_message(summary_msg)
 
     if all_chains:
-        save_multi_ticker_csv(all_chains, spots_by_ticker, csv_path)
-        send_telegram_document(
-            csv_path,
-            f"📂 eurex_wheel_chains.csv ({len(all_chains)} strike totali su {len(WATCHLIST)} titoli)"
-        )
+        enriched_rows = prepare_enriched_rows(all_chains, spots_by_ticker)
+        pd.DataFrame(enriched_rows).to_csv(csv_path, index=False)
+
+        # Salva JSON per la Web-App Android
+        web_payload = {
+            "updated_at": datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC"),
+            "portfolio": WATCHLIST,
+            "spots": spots_by_ticker,
+            "technicals": tech_by_ticker,
+            "chains": enriched_rows
+        }
+        with open(json_path, "w", encoding="utf-8") as jf:
+            json.dump(web_payload, jf, indent=2)
+
+        # Genera e invia il file Excel (.xlsx) a 4 schede
+        generate_excel_workbook(enriched_rows, spots_by_ticker, tech_by_ticker, excel_path)
+        send_telegram_document(excel_path, "📊 Wheel_Control_Center.xlsx (4 Schede: Portafoglio, Scanner Put, Scanner Call, Catene)")
+        send_telegram_document(csv_path, f"📂 eurex_wheel_chains.csv ({len(enriched_rows)} strike totali)")
 
 
 if __name__ == "__main__":
