@@ -160,6 +160,16 @@ def parse_num(val) -> float:
     return float(m.group(0)) if m else 0.0
 
 
+def get_live_price(bid: float, ask: float, last: float, settle: float) -> float:
+    """
+    Usa la media Bid/Ask (Mid Price) quando il book è attivo a mercati aperti;
+    altrimenti usa Last o D. Settle a mercati chiusi.
+    """
+    if bid > 0.0 and ask > 0.0:
+        return round((bid + ask) / 2.0, 4)
+    return last or settle or ask or bid or 0.0
+
+
 def fetch_yf_technicals(yf_symbol: str) -> dict:
     """Scarica Prezzo Spot Xetra, RSI(14), Volatilità Storica HV20 e SMA50 da Yahoo Finance."""
     info = {"spot": 0.0, "rsi": 50.0, "hv20": 0.0, "sma50": 0.0}
@@ -173,7 +183,6 @@ def fetch_yf_technicals(yf_symbol: str) -> dict:
         info["spot"] = float(closes.iloc[-1])
         info["sma50"] = float(closes.tail(50).mean())
 
-        # Calcolo RSI(14)
         delta = closes.diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
@@ -182,7 +191,6 @@ def fetch_yf_technicals(yf_symbol: str) -> dict:
         if not np.isnan(rsi_s.iloc[-1]):
             info["rsi"] = float(rsi_s.iloc[-1])
 
-        # Calcolo Volatilità Storica a 20 giorni annualizzata (HV20)
         log_ret = np.log(closes / closes.shift(1)).dropna()
         info["hv20"] = float(log_ret.tail(20).std() * math.sqrt(252) * 100.0)
     except Exception:
@@ -252,19 +260,13 @@ def dismiss_cookies(page):
 
 
 def open_eurex_option_page(page, ticker: str, cfg: dict) -> bool:
-    """
-    Apre l'URL diretto di Eurex. Se l'ID numerico dell'URL dovesse essere cambiato
-    (nessuna tabella presente), cerca automaticamente il prodotto su Eurex tramite ISIN.
-    """
     page.goto(cfg["url"], wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(4000)
     dismiss_cookies(page)
 
-    has_table = page.locator("table tr").count() > 5
-    if has_table:
+    if page.locator("table tr").count() > 5:
         return True
 
-    # Auto-Discovery tramite ISIN nella ricerca di Eurex
     isin = cfg.get("isin", "")
     try:
         search_url = f"https://www.eurex.com/ex-en/find?q={isin}"
@@ -424,7 +426,7 @@ def generate_dashboard_chart(chain: list, ticker: str, exp_date_str: str, spot: 
     ax.set_xticklabels([f"{s:.0f}€" if s.is_integer() else f"{s:.2f}€" for s in strikes], rotation=45, fontsize=9)
     ax.set_ylabel("Open Interest (Contratti)", fontsize=10)
     ax.set_title(
-        f"{ticker} Eurex Options ({exp_date_str}) | Spot: {spot:.2f}€ | Max Pain: {max_pain:.2f}€",
+        f"{ticker} Eurex Options ({exp_date_str}) | Spot Live: {spot:.2f}€ | Max Pain: {max_pain:.2f}€",
         fontsize=12, fontweight="bold", pad=15
     )
     ax.grid(axis="y", linestyle="--", alpha=0.25)
@@ -446,18 +448,26 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
         pass
     T = dte / 365.0
 
-    # Stima Spot da Put-Call Parity o da Yahoo Finance Xetra
-    spot_estimates = []
+    # Priorità 1: Spot da Yahoo Finance Xetra o Put-Call Parity basata su Mid Price Live
+    spot_mid_estimates = []
+    spot_settle_estimates = []
     for row in valid_chain:
-        c_p = row["c_settle"] or row["c_last"]
-        p_p = row["p_settle"] or row["p_last"]
-        if c_p > 0.05 and p_p > 0.05:
-            spot_estimates.append(row["strike"] + c_p - p_p)
+        c_mid = get_live_price(row["c_bid"], row["c_ask"], 0.0, 0.0)
+        p_mid = get_live_price(row["p_bid"], row["p_ask"], 0.0, 0.0)
+        if c_mid > 0.05 and p_mid > 0.05:
+            spot_mid_estimates.append(row["strike"] + c_mid - p_mid)
 
-    if spot_estimates:
-        spot = float(np.median(spot_estimates))
-    elif tech["spot"] > 0:
+        c_s = row["c_settle"] or row["c_last"]
+        p_s = row["p_settle"] or row["p_last"]
+        if c_s > 0.05 and p_s > 0.05:
+            spot_settle_estimates.append(row["strike"] + c_s - p_s)
+
+    if tech["spot"] > 0:
         spot = tech["spot"]
+    elif spot_mid_estimates:
+        spot = float(np.median(spot_mid_estimates))
+    elif spot_settle_estimates:
+        spot = float(np.median(spot_settle_estimates))
     else:
         spot = cfg["pmc"]
 
@@ -493,13 +503,12 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
     max_pain_strike = min(pain_list, key=lambda x: x[1])[0]
 
     atm_row = min(valid_chain, key=lambda r: abs(r["strike"] - spot))
-    atm_put_price = atm_row["p_settle"] or atm_row["p_last"]
+    atm_put_price = get_live_price(atm_row["p_bid"], atm_row["p_ask"], atm_row["p_last"], atm_row["p_settle"])
     iv_atm, _, _ = compute_put_greeks(spot, atm_row["strike"], T, RISK_FREE_RATE, atm_put_price)
     if iv_atm <= 0:
         iv_atm = tech["hv20"] if tech["hv20"] > 0 else 30.0
     exp_move = spot * (iv_atm / 100.0) * math.sqrt(T)
 
-    # Edge Volatilità (IV vs HV20)
     hv20 = tech["hv20"]
     vol_edge_str = f"IV <code>{iv_atm:.1f}%</code> vs HV20 <code>{hv20:.1f}%</code>"
     if hv20 > 0 and iv_atm > hv20 * 1.10:
@@ -509,25 +518,25 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
 
     msg = f"📊 <b>QUANT REPORT EUREX — {ticker} ({cfg['name']})</b>\n"
     msg += f"📅 <b>Scadenza:</b> <code>{exp_date_str}</code> ({dte} gg) | <b>Strike Lette:</b> <code>{len(valid_chain)}</code>\n"
-    msg += f"💶 <b>Spot:</b> <code>{spot:.2f} €</code> | <b>PMC:</b> <code>{pmc:.2f} €</code> (<code>{stock_pl:+.0f}€ / {stock_pl_pct:+.1f}%</code>) | <b>FV:</b> <code>{fv:.0f} €</code>\n"
+    msg += f"💶 <b>Spot Live:</b> <code>{spot:.2f} €</code> | <b>PMC:</b> <code>{pmc:.2f} €</code> (<code>{stock_pl:+.0f}€ / {stock_pl_pct:+.1f}%</code>) | <b>FV:</b> <code>{fv:.0f} €</code>\n"
     msg += f"📈 <b>RSI(14):</b> <code>{tech['rsi']:.1f}</code> | <b>SMA50:</b> <code>{tech['sma50']:.2f}€</code> | {vol_edge_str}\n\n"
 
-    # Sezione 1: Monitoraggio Posizioni Opzioni Aperte (LONG e SHORT)
+    # Sezione 1: Monitoraggio Posizioni Opzioni Aperte (Prezzo Live Mid)
     open_opts = cfg.get("open_options", [])
     ticker_opt_pl = 0.0
     if open_opts:
-        msg += f"💼 <b>POSIZIONI OPZIONI APERTE SU {ticker}:</b>\n"
+        msg += f"💼 <b>POSIZIONI OPZIONI APERTE SU {ticker} (Valutazione Mid Live):</b>\n"
         for pos in open_opts:
             match = next((r for r in chain if r["ticker"] == ticker and r["expiration"] == pos["exp"] and abs(r["strike"] - pos["strike"]) < 0.01), None)
             curr_val = pos["entry"]
             bid_v, ask_v = 0.0, 0.0
             if match:
                 if pos["type"] == "P":
-                    curr_val = match["p_last"] or match["p_settle"] or match["p_ask"] or pos["entry"]
                     bid_v, ask_v = match["p_bid"], match["p_ask"]
+                    curr_val = get_live_price(bid_v, ask_v, match["p_last"], match["p_settle"]) or pos["entry"]
                 else:
-                    curr_val = match["c_last"] or match["c_settle"] or match["c_ask"] or pos["entry"]
                     bid_v, ask_v = match["c_bid"], match["c_ask"]
+                    curr_val = get_live_price(bid_v, ask_v, match["c_last"], match["c_settle"]) or pos["entry"]
 
             if pos["side"] == "SHORT":
                 pnl_eur = (pos["entry"] - curr_val) * 100.0
@@ -548,12 +557,11 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
             icon = "🟢" if pnl_eur >= 0 else "🔴"
             msg += (
                 f"• <b>{lbl} {pos['strike']:.2f}€</b> ({pos['exp']}) @ <code>{pos['entry']:.2f}€</code>\n"
-                f"  Quota: <code>{curr_val:.2f}€</code> (B/A: {bid_v:.2f}/{ask_v:.2f}) | "
+                f"  Mid Live: <code>{curr_val:.2f}€</code> (B/A: {bid_v:.2f}/{ask_v:.2f}) | "
                 f"P&amp;L: {icon} <b>{pnl_eur:+.1f}€</b> (<code>{pnl_pct:+.1f}%</code>){tp_str}\n"
             )
         msg += "\n"
 
-    # Segnale opportunità per titoli senza vendita attiva o in ipervenduto
     if not any(o["side"] == "SHORT" for o in open_opts):
         alerts_out.append(f"🔵 <b>{ticker}</b>: Nessuna opzione Short attiva (RSI {tech['rsi']:.0f}) -> Valuta ingresso Ruota.")
 
@@ -566,13 +574,13 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
     msg += f"• <b>Volumi Oggi:</b> C <code>{tot_c_vol:,}</code> | P <code>{tot_p_vol:,}</code>\n"
     msg += f"• <b>Expected Move (1 SD):</b> <code>±{exp_move:.2f} €</code> (<code>{spot - exp_move:.2f}€</code> ↔️ <code>{spot + exp_move:.2f}€</code>)\n\n"
 
-    # Sezione 3: Scanner Cash-Secured Put
+    # Sezione 3: Scanner Cash-Secured Put (Valutato su Mid Price Live)
     msg += "🎯 <b>LATO PUT (Vendita Put / Mediazione PMC)</b>\n"
     for r in valid_chain:
         k = r["strike"]
         if not ((spot * 0.88) <= k <= (spot * 1.01)):
             continue
-        prem = r["p_last"] or r["p_settle"]
+        prem = get_live_price(r["p_bid"], r["p_ask"], r["p_last"], r["p_settle"])
         if prem <= 0.08:
             continue
         iv, delta, prob_prof = compute_put_greeks(spot, k, T, RISK_FREE_RATE, prem)
@@ -581,19 +589,19 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
         new_pmc = (pmc + be) / 2.0
         tag = "⭐" if -0.32 <= delta <= -0.20 else "🔹"
         msg += (
-            f"{tag} <b>Put {k:.1f}€</b> | Quota: <code>{prem:.2f}€</code> (B/A: {r['p_bid']:.2f}/{r['p_ask']:.2f})\n"
+            f"{tag} <b>Put {k:.1f}€</b> | Mid: <code>{prem:.2f}€</code> (B/A: {r['p_bid']:.2f}/{r['p_ask']:.2f})\n"
             f"   Δ: <code>{delta:.2f}</code> | Prob: <code>{prob_prof:.0f}%</code> | BE: <code>{be:.2f}€</code> | "
             f"Ann: <b>{ann_roc:.1f}%</b> | PMC 200az: <code>{new_pmc:.2f}€</code>\n"
         )
 
-    # Sezione 4: Scanner Covered Call (solo premi >= 0.20 € per evitare micro-premi inefficienti)
+    # Sezione 4: Scanner Covered Call (Valutato su Mid Price Live >= 0.20 €)
     msg += "\n🛡️ <b>LATO CALL (Vendita Covered Call >= 0.20€)</b>\n"
     found_call = False
     for r in valid_chain:
         k = r["strike"]
         if not ((spot * 1.01) <= k <= (spot * 1.16)):
             continue
-        prem = r["c_last"] or r["c_settle"]
+        prem = get_live_price(r["c_bid"], r["c_ask"], r["c_last"], r["c_settle"])
         if prem < 0.20:
             continue
         found_call = True
@@ -601,12 +609,12 @@ def enrich_and_build_report(ticker: str, cfg: dict, exp_date_str: str, chain: li
         ann_roc_c = ((prem / spot) * 100.0) * (365.0 / dte)
         tag_c = "⭐" if (0.18 <= delta_c <= 0.35 and k >= pmc * 0.95) else "🔸"
         msg += (
-            f"{tag_c} <b>Call {k:.1f}€</b> | Quota: <code>{prem:.2f}€</code> (B/A: {r['c_bid']:.2f}/{r['c_ask']:.2f})\n"
+            f"{tag_c} <b>Call {k:.1f}€</b> | Mid: <code>{prem:.2f}€</code> (B/A: {r['c_bid']:.2f}/{r['c_ask']:.2f})\n"
             f"   Δ: <code>+{delta_c:.2f}</code> | Prob OTM: <code>{prob_c:.0f}%</code> | "
             f"Yield Annuo: <b>{ann_roc_c:.1f}%</b> | OI: <code>{r['c_oi']:,}</code>\n"
         )
     if not found_call:
-        msg += "<i>Nessuna Call OTM con premio >= 0.20€ (attendi rimbalzo del sottostante).</i>\n"
+        msg += "<i>Nessuna Call OTM con premio >= 0.20€ su questa scadenza.</i>\n"
 
     return msg, spot, max_pain_strike, stock_pl, ticker_opt_pl
 
@@ -616,8 +624,8 @@ def save_multi_ticker_csv(all_chains: list, spots_by_ticker: dict, filepath: str
         return
     fieldnames = [
         "ticker", "expiration", "dte", "spot_implied", "strike",
-        "c_settle", "c_bid", "c_ask", "c_last", "c_vol", "c_oi",
-        "p_bid", "p_ask", "p_last", "p_settle", "p_vol", "p_oi",
+        "c_settle", "c_bid", "c_ask", "c_mid", "c_last", "c_vol", "c_oi",
+        "p_bid", "p_ask", "p_mid", "p_last", "p_settle", "p_vol", "p_oi",
         "put_iv_pct", "put_delta", "put_prob_profit_pct", "put_breakeven", "put_roc_ann_pct",
         "call_iv_pct", "call_delta", "call_roc_ann_pct"
     ]
@@ -636,19 +644,21 @@ def save_multi_ticker_csv(all_chains: list, spots_by_ticker: dict, filepath: str
                 pass
             T = dte / 365.0
 
-            p_prem = r["p_settle"] or r["p_last"]
-            p_iv, p_delta, p_prob = compute_put_greeks(spot, r["strike"], T, RISK_FREE_RATE, p_prem)
-            p_be = (r["strike"] - p_prem) if p_prem > 0 else r["strike"]
-            p_roc = (((p_prem / p_be) * 100.0) * (365.0 / dte)) if (p_prem > 0 and p_be > 0) else 0.0
+            p_mid = get_live_price(r["p_bid"], r["p_ask"], r["p_last"], r["p_settle"])
+            p_iv, p_delta, p_prob = compute_put_greeks(spot, r["strike"], T, RISK_FREE_RATE, p_mid)
+            p_be = (r["strike"] - p_mid) if p_mid > 0 else r["strike"]
+            p_roc = (((p_mid / p_be) * 100.0) * (365.0 / dte)) if (p_mid > 0 and p_be > 0) else 0.0
 
-            c_prem = r["c_settle"] or r["c_last"]
-            c_iv, c_delta, _ = compute_call_greeks(spot, r["strike"], T, RISK_FREE_RATE, c_prem)
-            c_roc = (((c_prem / spot) * 100.0) * (365.0 / dte)) if (c_prem > 0 and spot > 0) else 0.0
+            c_mid = get_live_price(r["c_bid"], r["c_ask"], r["c_last"], r["c_settle"])
+            c_iv, c_delta, _ = compute_call_greeks(spot, r["strike"], T, RISK_FREE_RATE, c_mid)
+            c_roc = (((c_mid / spot) * 100.0) * (365.0 / dte)) if (c_mid > 0 and spot > 0) else 0.0
 
             row_out = dict(r)
             row_out.update({
                 "dte": dte,
                 "spot_implied": round(spot, 2),
+                "c_mid": round(c_mid, 4),
+                "p_mid": round(p_mid, 4),
                 "put_iv_pct": round(p_iv, 2),
                 "put_delta": round(p_delta, 3),
                 "put_prob_profit_pct": round(p_prob, 1),
@@ -663,7 +673,7 @@ def save_multi_ticker_csv(all_chains: list, spots_by_ticker: dict, filepath: str
 
 def main():
     tickers_list = ", ".join(WATCHLIST.keys())
-    send_telegram_message(f"⏳ <b>Centro di Controllo Wheel Strategy</b>\nAvvio scansione completa per 5 titoli: <code>{tickers_list}</code>...")
+    send_telegram_message(f"⏳ <b>Centro di Controllo Wheel Strategy (Live Mid)</b>\nAvvio scansione completa per: <code>{tickers_list}</code>...")
 
     all_chains = []
     spots_by_ticker = {}
@@ -728,10 +738,9 @@ def main():
 
         browser.close()
 
-    # Riepilogo Esecutivo Globale (Centro di Controllo Portafoglio)
     summary_msg = "🏛️ <b>RIEPILOGO ESECUTIVO PORTAFOGLIO (WHEEL CONTROL CENTER)</b>\n\n"
     summary_msg += f"• <b>P&amp;L Irrealizzato Azioni (5 Lotti):</b> <code>{total_stock_pl:+.2f} €</code>\n"
-    summary_msg += f"• <b>P&amp;L Aperto Opzioni Eurex:</b> <code>{total_opt_pl:+.2f} €</code>\n"
+    summary_msg += f"• <b>P&amp;L Aperto Opzioni Eurex (Mid Live):</b> <code>{total_opt_pl:+.2f} €</code>\n"
     summary_msg += f"• <b>Margine Cash-Secured Put Impegnato:</b> <code>{total_short_put_margin:,.0f} €</code>\n\n"
     summary_msg += "🚦 <b>SEMAFORO OPERATIVO DI OGGI:</b>\n"
     if alerts:
