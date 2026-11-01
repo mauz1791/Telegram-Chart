@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0d1117" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Wheel Control Center</title>
+  <style>
+    :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; }
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { margin: 0; padding: 12px 12px 80px; background: var(--bg); color: var(--text); font-size: 14px; }
+    .header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+    .header h1 { font-size: 18px; margin: 0; color: var(--accent); }
+    .kpi-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 14px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+    .kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .kpi-val { font-size: 18px; font-weight: 700; margin-top: 4px; }
+    .pos { color: var(--green); } .neg { color: var(--red); }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    select, input[type="file"], button { background: var(--card); color: var(--text); border: 1px solid var(--border); padding: 8px 10px; border-radius: 8px; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th, td { padding: 8px 6px; text-align: right; border-bottom: 1px solid var(--border); }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-weight: 600; background: #12161c; }
+    .badge { padding: 2px 6px; border-radius: 4px; font-weight: 700; font-size: 11px; }
+    .b-star { background: rgba(63,185,80,0.2); color: var(--green); border: 1px solid var(--green); }
+    .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); border-top: 1px solid var(--border); display: flex; justify-content: space-around; padding: 8px 0; z-index: 99; }
+    .nav-btn { background: none; border: none; color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
+    .nav-btn.active { color: var(--accent); }
+    .tab-pane { display: none; } .tab-pane.active { display: block; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <h1>⚙️ Wheel Control Center</h1>
+      <div id="status-txt" style="font-size:11px;color:var(--muted);">Caricamento dati...</div>
+    </div>
+    <label style="background:#238636;color:#fff;padding:7px 12px;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;">
+      📂 Carica CSV
+      <input type="file" id="csvFile" accept=".csv" style="display:none;" />
+    </label>
+  </div>
+
+  <div class="filters">
+    <select id="fTicker" onchange="renderAll()">
+      <option value="ALL">Tutti i Titoli (5)</option>
+      <option value="BMW">BMW (PMC 74€)</option>
+      <option value="RWE">RWE (PMC 60€)</option>
+      <option value="DTE">DTE (PMC 29€)</option>
+      <option value="DAI">DAI (PMC 46€)</option>
+      <option value="DWS">DWS (PMC 74€)</option>
+    </select>
+    <select id="fExp" onchange="renderAll()">
+      <option value="ALL">Tutte le Scadenze</option>
+      <option value="20/11/2026">20/11/2026</option>
+      <option value="18/12/2026">18/12/2026</option>
+    </select>
+  </div>
+
+  <!-- TAB 1: SCANNER PUT -->
+  <div id="tab-put" class="tab-pane active">
+    <div class="card" style="overflow-x:auto;">
+      <div style="font-weight:700;margin-bottom:8px;color:var(--accent);">🎯 Scanner Cash-Secured Put (Delta -0.12 / -0.45)</div>
+      <table id="tbl-put">
+        <thead>
+          <tr><th>Titolo</th><th>Scad</th><th>Strike</th><th>Mid</th><th>Δ</th><th>BE</th><th>ROC Ann.</th><th>PMC 200az</th><th>OI</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- TAB 2: SCANNER CALL -->
+  <div id="tab-call" class="tab-pane">
+    <div class="card" style="overflow-x:auto;">
+      <div style="font-weight:700;margin-bottom:8px;color:var(--accent);">🛡️ Scanner Covered Call (Premio ≥ 0.20€)</div>
+      <table id="tbl-call">
+        <thead>
+          <tr><th>Titolo</th><th>Scad</th><th>Strike</th><th>Mid</th><th>Δ</th><th>Yield Ann.</th><th>Call OI</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- TAB 3: MURI OPEN INTEREST -->
+  <div id="tab-oi" class="tab-pane">
+    <div class="card" style="overflow-x:auto;">
+      <div style="font-weight:700;margin-bottom:8px;color:var(--accent);">🧱 Mappa Muri Open Interest & Volumi</div>
+      <table id="tbl-oi">
+        <thead>
+          <tr><th>Titolo</th><th>Scad</th><th>Strike</th><th>Call OI</th><th>Call Vol</th><th>Put OI</th><th>Put Vol</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="bottom-nav">
+    <button class="nav-btn active" onclick="switchTab('put', this)">🎯 Scanner Put</button>
+    <button class="nav-btn" onclick="switchTab('call', this)">🛡️ Scanner Call</button>
+    <button class="nav-btn" onclick="switchTab('oi', this)">🧱 Muri OI</button>
+  </div>
+
+  <script>
+    const PMC_MAP = { BMW: 74.0, RWE: 60.0, DTE: 29.0, DAI: 46.0, DWS: 74.0 };
+    let CHAIN_DATA = [];
+
+    function switchTab(tabId, btn) {
+      document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
+      document.getElementById('tab-' + tabId).classList.add('active');
+      btn.classList.add('active');
+    }
+
+    function parseCSV(text) {
+      const lines = text.trim().split('\n');
+      const headers = lines[0].split(',').map(h => h.trim());
+      return lines.slice(1).map(line => {
+        const vals = line.split(',');
+        const obj = {};
+        headers.forEach((h, i) => {
+          const v = vals[i] ? vals[i].trim() : '';
+          obj[h] = isNaN(v) || v === '' ? v : parseFloat(v);
+        });
+        if (!obj.p_mid) obj.p_mid = (obj.p_bid > 0 && obj.p_ask > 0) ? (obj.p_bid + obj.p_ask) / 2 : (obj.p_last || obj.p_settle || 0);
+        if (!obj.c_mid) obj.c_mid = (obj.c_bid > 0 && obj.c_ask > 0) ? (obj.c_bid + obj.c_ask) / 2 : (obj.c_last || obj.c_settle || 0);
+        return obj;
+      });
+    }
+
+    function renderAll() {
+      const tkr = document.getElementById('fTicker').value;
+      const exp = document.getElementById('fExp').value;
+      const rows = CHAIN_DATA.filter(r => (tkr === 'ALL' || r.ticker === tkr) && (exp === 'ALL' || r.expiration === exp));
+
+      // 1. Render Put
+      const putRows = rows.filter(r => r.put_delta <= -0.12 && r.put_delta >= -0.46 && r.p_mid >= 0.10)
+                          .sort((a, b) => b.put_roc_ann_pct - a.put_roc_ann_pct);
+      document.querySelector('#tbl-put tbody').innerHTML = putRows.map(r => {
+        const pmc = PMC_MAP[r.ticker] || r.spot_implied;
+        const be = (r.strike - r.p_mid).toFixed(2);
+        const newPmc = ((pmc + parseFloat(be)) / 2).toFixed(2);
+        const isSweet = r.put_delta >= -0.32 && r.put_delta <= -0.20;
+        return `<tr>
+          <td><b>${r.ticker}</b> <span style="color:var(--muted);font-size:11px;">(${r.spot_implied}€)</span></td>
+          <td>${r.expiration.slice(0,5)}</td>
+          <td>${isSweet ? `<span class="badge b-star">★ ${r.strike}€</span>` : `<b>${r.strike}€</b>`}</td>
+          <td>${r.p_mid.toFixed(2)}€</td>
+          <td>${r.put_delta.toFixed(2)}</td>
+          <td>${be}€</td>
+          <td class="pos"><b>${r.put_roc_ann_pct.toFixed(1)}%</b></td>
+          <td>${newPmc}€</td>
+          <td>${r.p_oi.toLocaleString()}</td>
+        </tr>`;
+      }).join('');
+
+      // 2. Render Call
+      const callRows = rows.filter(r => r.call_delta >= 0.10 && r.call_delta <= 0.45 && r.c_mid >= 0.20 && r.strike > r.spot_implied)
+                           .sort((a, b) => b.call_roc_ann_pct - a.call_roc_ann_pct);
+      document.querySelector('#tbl-call tbody').innerHTML = callRows.map(r => `<tr>
+        <td><b>${r.ticker}</b> <span style="color:var(--muted);font-size:11px;">(PMC ${PMC_MAP[r.ticker]}€)</span></td>
+        <td>${r.expiration.slice(0,5)}</td>
+        <td><b>${r.strike}€</b></td>
+        <td>${r.c_mid.toFixed(2)}€</td>
+        <td>+${r.call_delta.toFixed(2)}</td>
+        <td class="pos"><b>${r.call_roc_ann_pct.toFixed(1)}%</b></td>
+        <td>${r.c_oi.toLocaleString()}</td>
+      </tr>`).join('');
+
+      // 3. Render OI
+      document.querySelector('#tbl-oi tbody').innerHTML = rows.map(r => `<tr>
+        <td><b>${r.ticker}</b></td>
+        <td>${r.expiration.slice(0,5)}</td>
+        <td><b>${r.strike}€</b></td>
+        <td style="color:#00d2ff">${r.c_oi.toLocaleString()}</td>
+        <td>${r.c_vol}</td>
+        <td style="color:#ff4b4b"><b>${r.p_oi.toLocaleString()}</b></td>
+        <td>${r.p_vol}</td>
+      </tr>`).join('');
+    }
+
+    document.getElementById('csvFile').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        CHAIN_DATA = parseCSV(ev.target.result);
+        document.getElementById('status-txt').innerText = `Dati caricati da CSV (${CHAIN_DATA.length} strike)`;
+        renderAll();
+      };
+      reader.readAsText(file);
+    });
+
+    // Caricamento automatico da GitHub Pages se presente nello stesso repository
+    fetch('eurex_wheel_chains.csv')
+      .then(r => r.ok ? r.text() : Promise.reject())
+      .then(txt => {
+        CHAIN_DATA = parseCSV(txt);
+        document.getElementById('status-txt').innerText = `Sincronizzato con GitHub (${CHAIN_DATA.length} strike)`;
+        renderAll();
+      })
+      .catch(() => {
+        document.getElementById('status-txt').innerText = 'Tocca "Carica CSV" in alto a destra per visualizzare i dati';
+      });
+  </script>
+</body>
+</html>
