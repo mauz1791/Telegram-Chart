@@ -7,6 +7,9 @@ on:
     - cron: '30 18 * * 1-5'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run-reporter:
     runs-on: ubuntu-24.04
@@ -21,7 +24,7 @@ jobs:
 
       - name: Install Dependencies & Playwright
         run: |
-          pip install requests playwright numpy scipy pandas matplotlib pillow yfinance
+          pip install requests playwright numpy scipy pandas matplotlib pillow yfinance openpyxl
           playwright install chromium --with-deps
 
       - name: Execute Script
@@ -29,3 +32,11 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python eurex_reporter.py
+
+      - name: Aggiorna Dati per Web-App Android ed Excel nel Repo
+        run: |
+          git config user.name "Wheel-Bot"
+          git config user.email "bot@github.com"
+          git add eurex_wheel_chains.csv wheel_data.json Wheel_Control_Center.xlsx || true
+          git diff --staged --quiet || git commit -m "Auto-update Eurex Wheel data"
+          git push || true
