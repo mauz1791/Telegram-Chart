@@ -3,8 +3,9 @@ name: Eurex Daily Telegram Alert
 on:
   push:
     branches: [ main, master ]
-  schedule:
-    - cron: '30 18 * * 1-5'
+    schedule:
+    - cron: '45 15 * * 1-5'  # 16:45 CET (Mercati Aperti: segnali operativi e Bid/Ask reali)
+    - cron: '30 18 * * 1-5'  # 19:30 CET (Mercati Chiusi: D. Settle ufficiali e riepilogo serale)
   workflow_dispatch:
 
 permissions:
